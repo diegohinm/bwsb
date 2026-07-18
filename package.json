@@ -1,7 +1,7 @@
 {
   "name": "reddit-radar-bwsb",
   "version": "1.0.0",
-  "description": "Reddit Radar backend (Node.js + Express + TypeScript)",
+  "description": "Backend for StonkTerminal, internally known as bwsb.",
   "private": true,
   "type": "module",
   "main": "dist/server.js",
