@@ -1,0 +1,38 @@
+// Prisma schema for bwsb (backend for StonkTerminal, internal project "wsb").
+//
+// The datasource points at DATABASE_URL, which MUST be a PostgreSQL connection
+// string (server-side only, never exposed to the frontend). Reddit is the only
+// identity provider — users are always keyed by `redditId`, never by username.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+/// A local user account. Identity is provided by Reddit OAuth; we never store
+/// Reddit passwords, access tokens, or refresh tokens. `redditId` is the stable
+/// primary identity — usernames can change and must never be used as identity.
+model User {
+  id String @id @default(cuid())
+
+  // Reddit identity (from GET https://oauth.reddit.com/api/v1/me).
+  redditId               String    @unique @map("reddit_id")
+  redditUsername         String    @map("reddit_username")
+  redditAvatarUrl        String?   @map("reddit_avatar_url")
+  redditCreatedAt        DateTime? @map("reddit_created_at")
+  redditHasVerifiedEmail Boolean   @default(false) @map("reddit_has_verified_email")
+
+  // Optional email, added and verified later (not required for login — Reddit
+  // OAuth does not expose the user's email address).
+  email         String?  @unique
+  emailVerified Boolean  @default(false) @map("email_verified")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@map("users")
+}

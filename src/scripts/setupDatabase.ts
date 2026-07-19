@@ -43,6 +43,22 @@ function getDatabaseUrl(): string {
 }
 
 const SCHEMA_SQL = /* sql */ `
+-- Local user accounts. Identity comes from Reddit OAuth (see prisma/schema.prisma
+-- — this table is the SQL counterpart of the Prisma \`User\` model and is read
+-- and written at runtime via Prisma Client). Users are keyed by reddit_id.
+CREATE TABLE IF NOT EXISTS public.users (
+  id                        text PRIMARY KEY,
+  reddit_id                 text NOT NULL UNIQUE,
+  reddit_username           text NOT NULL,
+  reddit_avatar_url         text,
+  reddit_created_at         timestamptz,
+  reddit_has_verified_email boolean NOT NULL DEFAULT false,
+  email                     text UNIQUE,
+  email_verified            boolean NOT NULL DEFAULT false,
+  created_at                timestamptz NOT NULL DEFAULT now(),
+  updated_at                timestamptz NOT NULL DEFAULT now()
+);
+
 -- Reference table of tracked tickers.
 CREATE TABLE IF NOT EXISTS public.tickers (
   ticker         text PRIMARY KEY,
