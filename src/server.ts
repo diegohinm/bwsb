@@ -5,9 +5,20 @@ import morgan from "morgan";
 
 import { env, isProduction } from "./config/env.js";
 import { sessionMiddleware } from "./lib/sessionStore.js";
+import { optionalAuth } from "./middleware/optionalAuth.js";
 import { healthRouter } from "./routes/health.routes.js";
 import { authRouter } from "./routes/auth.routes.js";
 import { tickersRouter } from "./routes/tickers.routes.js";
+import { trendsRouter } from "./routes/trends.routes.js";
+import { signalsRouter } from "./routes/signals.routes.js";
+import { betsRouter } from "./routes/bets.routes.js";
+import { backtestsRouter } from "./routes/backtests.routes.js";
+import { alertsRouter } from "./routes/alerts.routes.js";
+import { screenerRouter } from "./routes/screener.routes.js";
+import { researchRouter } from "./routes/research.routes.js";
+import { searchRouter } from "./routes/search.routes.js";
+import { productRouter } from "./routes/product.routes.js";
+import { personalRouter } from "./routes/personal.routes.js";
 import { notFound } from "./middleware/notFound.js";
 import { errorHandler } from "./middleware/errorHandler.js";
 
@@ -37,6 +48,10 @@ app.use(express.json());
 // reads or writes req.session.
 app.use(sessionMiddleware);
 
+// Best-effort auth: attaches req.user when a valid session exists, but never
+// blocks anonymous/public requests.
+app.use(optionalAuth);
+
 // Request logging.
 app.use(morgan("dev"));
 
@@ -44,6 +59,18 @@ app.use(morgan("dev"));
 app.use(healthRouter);
 app.use("/auth", authRouter);
 app.use("/api", tickersRouter);
+app.use("/api", trendsRouter);
+app.use("/api", signalsRouter);
+app.use("/api", betsRouter);
+app.use("/api", backtestsRouter);
+app.use("/api", alertsRouter);
+app.use("/api", screenerRouter);
+app.use("/api", researchRouter);
+app.use("/api", searchRouter);
+app.use("/api", productRouter);
+// Protected personal features (requireAuth applied inside the router). Mounted
+// after the public routers so public routes are handled without auth.
+app.use("/api", personalRouter);
 
 // 404 + error handling (must come last).
 app.use(notFound);
