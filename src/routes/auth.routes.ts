@@ -1,6 +1,6 @@
 import { Router, type Request, type Response } from "express";
 
-import { env } from "../config/env.js";
+import { env, isProduction } from "../config/env.js";
 import {
   buildAuthorizeUrl,
   exchangeCodeForToken,
@@ -34,7 +34,30 @@ authRouter.get("/reddit", (req: Request, res: Response) => {
       res.redirect(`${env.FRONTEND_URL}/login?error=session`);
       return;
     }
+    // Safe log only — never the client id/secret or the state value.
+    console.log("Redirecting to Reddit OAuth");
     res.redirect(buildAuthorizeUrl(state));
+  });
+});
+
+/**
+ * GET /auth/reddit/config-check  (development only)
+ *
+ * Lightweight diagnostic to confirm the Reddit OAuth env vars are wired up,
+ * without ever leaking secrets. Returns booleans plus a truncated client id
+ * (first 4 chars) and the redirect URI. Disabled in production (404).
+ */
+authRouter.get("/reddit/config-check", (_req: Request, res: Response) => {
+  if (isProduction) {
+    return res.status(404).json({ error: "Not found" });
+  }
+
+  return res.json({
+    hasClientId: Boolean(env.REDDIT_CLIENT_ID),
+    clientIdPrefix: env.REDDIT_CLIENT_ID.slice(0, 4),
+    hasClientSecret: Boolean(env.REDDIT_CLIENT_SECRET),
+    redirectUri: env.REDDIT_REDIRECT_URI,
+    hasUserAgent: Boolean(env.REDDIT_USER_AGENT),
   });
 });
 

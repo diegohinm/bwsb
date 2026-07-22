@@ -15,7 +15,8 @@ const REDDIT_IDENTITY_URL = "https://oauth.reddit.com/api/v1/me";
 
 // Reddit requires a unique, descriptive User-Agent or it aggressively rate
 // limits / blocks the request. Format: <platform>:<app id>:<version> (by /u/...).
-const USER_AGENT = "web:stonkterminal-bwsb:1.0.0 (by /u/stonkterminal)";
+// Sourced from env so it can be tuned per-deployment without a code change.
+const USER_AGENT = env.REDDIT_USER_AGENT;
 
 /** Generate a cryptographically random `state` value for CSRF protection. */
 export function generateState(): string {

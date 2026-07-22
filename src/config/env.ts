@@ -41,15 +41,36 @@ const envSchema = z.object({
 
   // Reddit OAuth 2.0 credentials. The client secret is server-side only and is
   // never sent to the frontend.
+  //
+  // The `.refine` guards reject the placeholder values shipped in .env.example
+  // (e.g. "your_reddit_client_id"). Without this, a placeholder passes a plain
+  // `.min(1)` check and the app happily builds a Reddit URL with a fake
+  // client_id — exactly the "client_id=your_reddit_client_id" bug we're fixing.
   REDDIT_CLIENT_ID: z
     .string()
-    .min(1, { message: "REDDIT_CLIENT_ID is required" }),
+    .min(1, { message: "REDDIT_CLIENT_ID is required" })
+    .refine((v) => !/^your_reddit/i.test(v), {
+      message:
+        "REDDIT_CLIENT_ID is still the placeholder — set a real client id from https://www.reddit.com/prefs/apps",
+    }),
   REDDIT_CLIENT_SECRET: z
     .string()
-    .min(1, { message: "REDDIT_CLIENT_SECRET is required" }),
+    .min(1, { message: "REDDIT_CLIENT_SECRET is required" })
+    .refine((v) => !/^your_reddit/i.test(v), {
+      message:
+        "REDDIT_CLIENT_SECRET is still the placeholder — set a real client secret",
+    }),
   REDDIT_REDIRECT_URI: z
     .string()
-    .url({ message: "REDDIT_REDIRECT_URI must be a valid URL" }),
+    .url({ message: "REDDIT_REDIRECT_URI must be a valid URL" })
+    .refine((v) => /^https?:\/\//i.test(v), {
+      message: "REDDIT_REDIRECT_URI must be an http(s) URL",
+    }),
+  // Descriptive User-Agent required by Reddit (it rate-limits/blocks generic
+  // agents). Format: <platform>:<app id>:<version> (by /u/<username>).
+  REDDIT_USER_AGENT: z
+    .string()
+    .min(1, { message: "REDDIT_USER_AGENT is required" }),
 });
 
 const parsed = envSchema.safeParse(process.env);
