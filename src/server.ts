@@ -2,12 +2,17 @@ import express from "express";
 import cors from "cors";
 import helmet from "helmet";
 import morgan from "morgan";
+import cookieParser from "cookie-parser";
 
-import { env, isProduction } from "./config/env.js";
+import { env, isProduction, isRedditOAuthConfigured } from "./config/env.js";
 import { sessionMiddleware } from "./lib/sessionStore.js";
 import { optionalAuth } from "./middleware/optionalAuth.js";
 import { healthRouter } from "./routes/health.routes.js";
 import { authRouter } from "./routes/auth.routes.js";
+import {
+  redditVerificationRouter,
+  adminRedditVerificationRouter,
+} from "./routes/redditVerification.routes.js";
 import { tickersRouter } from "./routes/tickers.routes.js";
 import { trendsRouter } from "./routes/trends.routes.js";
 import { signalsRouter } from "./routes/signals.routes.js";
@@ -36,7 +41,7 @@ app.use(helmet());
 // Allow the frontend origin only, and permit cookies to be sent with requests.
 app.use(
   cors({
-    origin: env.FRONTEND_URL,
+    origin: env.FRONTEND_ORIGIN,
     credentials: true,
   }),
 );
@@ -44,8 +49,11 @@ app.use(
 // Body parsing.
 app.use(express.json());
 
-// Server-side sessions (PostgreSQL-backed) — must come before any route that
-// reads or writes req.session.
+// Cookie parsing — required before optionalAuth reads the yt_session cookie.
+app.use(cookieParser());
+
+// Legacy express-session (PostgreSQL-backed) — retained only for the optional/
+// future Reddit OAuth handshake (req.session.oauthState / userId).
 app.use(sessionMiddleware);
 
 // Best-effort auth: attaches req.user when a valid session exists, but never
@@ -68,6 +76,10 @@ app.use("/api", screenerRouter);
 app.use("/api", researchRouter);
 app.use("/api", searchRouter);
 app.use("/api", productRouter);
+// Optional Reddit username verification (requireAuth applied inside the router).
+app.use("/api", redditVerificationRouter);
+// Admin review endpoints (x-admin-secret applied inside the router).
+app.use("/admin", adminRedditVerificationRouter);
 // Protected personal features (requireAuth applied inside the router). Mounted
 // after the public routers so public routes are handled without auth.
 app.use("/api", personalRouter);
@@ -78,4 +90,9 @@ app.use(errorHandler);
 
 app.listen(env.PORT, () => {
   console.log(`BWSB backend running on ${env.BACKEND_URL}`);
+  console.log(
+    `Reddit OAuth: ${
+      isRedditOAuthConfigured ? "configured" : "NOT configured (email auth only)"
+    }`,
+  );
 });

@@ -1,7 +1,7 @@
 /**
  * setupDatabase.ts
  *
- * Creates the full database schema for bwsb (backend for StonkTerminal, internal
+ * Creates the full database schema for bwsb (backend for YoloTerminal, internal
  * project "wsb"). Idempotent — every statement uses IF NOT EXISTS so it is safe
  * to run repeatedly.
  *
@@ -59,6 +59,95 @@ CREATE TABLE IF NOT EXISTS public.users (
   email_verified            boolean NOT NULL DEFAULT false,
   created_at                timestamptz NOT NULL DEFAULT now(),
   updated_at                timestamptz NOT NULL DEFAULT now()
+);
+
+-- ══ Email/password auth (PRIMARY identity) ══════════════════════════════════
+-- app_users is the primary account record for email + password auth. This is
+-- separate from public.users (legacy Reddit-OAuth identity), which is retained
+-- for the optional/future Reddit OAuth flow.
+CREATE TABLE IF NOT EXISTS public.app_users (
+  id                uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  email             text UNIQUE NOT NULL,
+  email_normalized  text UNIQUE NOT NULL,
+  email_verified_at timestamptz,
+  password_hash     text,
+  display_name      text,
+  avatar_url        text,
+  created_at        timestamptz NOT NULL DEFAULT now(),
+  updated_at        timestamptz NOT NULL DEFAULT now(),
+  last_login_at     timestamptz
+);
+
+-- Opaque session tokens (sha256-hashed). The raw token lives only in the
+-- httpOnly yt_session cookie and is never stored.
+CREATE TABLE IF NOT EXISTS public.user_sessions (
+  id                 uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id            uuid NOT NULL REFERENCES public.app_users(id) ON DELETE CASCADE,
+  session_token_hash text UNIQUE NOT NULL,
+  expires_at         timestamptz NOT NULL,
+  created_at         timestamptz NOT NULL DEFAULT now()
+);
+
+-- One-time email verification / set-password tokens (sha256-hashed).
+CREATE TABLE IF NOT EXISTS public.email_verification_tokens (
+  id         uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id    uuid NOT NULL REFERENCES public.app_users(id) ON DELETE CASCADE,
+  token_hash text UNIQUE NOT NULL,
+  expires_at timestamptz NOT NULL,
+  used_at    timestamptz,
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+
+-- One-time password reset tokens (sha256-hashed).
+CREATE TABLE IF NOT EXISTS public.password_reset_tokens (
+  id         uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id    uuid NOT NULL REFERENCES public.app_users(id) ON DELETE CASCADE,
+  token_hash text UNIQUE NOT NULL,
+  expires_at timestamptz NOT NULL,
+  used_at    timestamptz,
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+
+-- Verified Reddit accounts linked to an app_user (badge / credibility only).
+CREATE TABLE IF NOT EXISTS public.reddit_accounts (
+  id                         uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id                    uuid NOT NULL REFERENCES public.app_users(id) ON DELETE CASCADE,
+  reddit_username            text NOT NULL,
+  reddit_username_normalized text UNIQUE NOT NULL,
+  reddit_user_id             text UNIQUE,
+  verification_method        text NOT NULL CHECK (verification_method IN ('oauth','inbound_dm_manual','inbound_dm_automated')),
+  verification_status        text NOT NULL DEFAULT 'pending' CHECK (verification_status IN ('pending','verified','rejected','expired')),
+  verified_at                timestamptz,
+  created_at                 timestamptz NOT NULL DEFAULT now(),
+  updated_at                 timestamptz NOT NULL DEFAULT now()
+);
+
+-- Inbound Reddit verification requests: user sends a code to u/<verify account>.
+CREATE TABLE IF NOT EXISTS public.reddit_verification_requests (
+  id                         uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id                    uuid NOT NULL REFERENCES public.app_users(id) ON DELETE CASCADE,
+  reddit_username            text NOT NULL,
+  reddit_username_normalized text NOT NULL,
+  verification_code          text NOT NULL,
+  status                     text NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','user_claimed_sent','verified','rejected','expired')),
+  expires_at                 timestamptz NOT NULL,
+  verified_at                timestamptz,
+  rejected_at                timestamptz,
+  admin_notes                text,
+  created_at                 timestamptz NOT NULL DEFAULT now(),
+  updated_at                 timestamptz NOT NULL DEFAULT now()
+);
+
+-- Audit trail for auth events (login, signup, reset, reddit verification, …).
+CREATE TABLE IF NOT EXISTS public.auth_events (
+  id            uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id       uuid REFERENCES public.app_users(id) ON DELETE SET NULL,
+  event_type    text NOT NULL,
+  success       boolean NOT NULL,
+  ip_address    text,
+  user_agent    text,
+  error_message text,
+  created_at    timestamptz NOT NULL DEFAULT now()
 );
 
 -- ══ Reference / existing tables ═════════════════════════════════════════════
@@ -804,6 +893,19 @@ CREATE TABLE IF NOT EXISTS public.competition_leaderboard_snapshots (
 );
 
 -- ══ Indexes ═════════════════════════════════════════════════════════════════
+-- Auth / email + reddit verification.
+CREATE INDEX IF NOT EXISTS app_users_email_normalized_idx ON public.app_users (email_normalized);
+CREATE INDEX IF NOT EXISTS user_sessions_token_hash_idx ON public.user_sessions (session_token_hash);
+CREATE INDEX IF NOT EXISTS user_sessions_user_idx ON public.user_sessions (user_id);
+CREATE INDEX IF NOT EXISTS email_verification_tokens_hash_idx ON public.email_verification_tokens (token_hash);
+CREATE INDEX IF NOT EXISTS password_reset_tokens_hash_idx ON public.password_reset_tokens (token_hash);
+CREATE INDEX IF NOT EXISTS reddit_accounts_username_norm_idx ON public.reddit_accounts (reddit_username_normalized);
+CREATE INDEX IF NOT EXISTS reddit_accounts_user_idx ON public.reddit_accounts (user_id);
+CREATE INDEX IF NOT EXISTS reddit_verif_requests_user_idx ON public.reddit_verification_requests (user_id);
+CREATE INDEX IF NOT EXISTS reddit_verif_requests_status_idx ON public.reddit_verification_requests (status);
+CREATE INDEX IF NOT EXISTS reddit_verif_requests_code_idx ON public.reddit_verification_requests (verification_code);
+CREATE INDEX IF NOT EXISTS auth_events_user_idx ON public.auth_events (user_id);
+
 CREATE INDEX IF NOT EXISTS ticker_mentions_ticker_idx ON public.ticker_mentions (ticker);
 CREATE INDEX IF NOT EXISTS ticker_mentions_created_idx ON public.ticker_mentions (created_at);
 CREATE INDEX IF NOT EXISTS ticker_metrics_5m_bucket_idx ON public.ticker_metrics_5m (bucket_start);

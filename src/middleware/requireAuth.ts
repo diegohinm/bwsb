@@ -1,6 +1,9 @@
 import type { NextFunction, Request, Response } from "express";
 
-import { findUserById, toPublicUser } from "../services/user.js";
+import {
+  verifySessionToken,
+  SESSION_COOKIE_NAME,
+} from "../services/auth/session.service.js";
 
 /**
  * requireAuth
@@ -9,8 +12,8 @@ import { findUserById, toPublicUser } from "../services/user.js";
  * `{ "error": "Authentication required" }` when there is no valid session.
  * On success `req.user` is guaranteed to be populated.
  *
- * Works whether or not optionalAuth ran earlier: if `req.user` is already set
- * it is reused, otherwise the session is validated here.
+ * Works whether or not optionalAuth ran earlier: if `req.user` is already set it
+ * is reused, otherwise the yt_session cookie is validated here.
  */
 export async function requireAuth(
   req: Request,
@@ -19,10 +22,10 @@ export async function requireAuth(
 ): Promise<void> {
   try {
     if (!req.user) {
-      const userId = req.session?.userId;
-      if (userId) {
-        const user = await findUserById(userId);
-        if (user) req.user = toPublicUser(user);
+      const token = req.cookies?.[SESSION_COOKIE_NAME];
+      if (typeof token === "string" && token) {
+        const user = await verifySessionToken(token);
+        if (user) req.user = user;
       }
     }
   } catch (err) {

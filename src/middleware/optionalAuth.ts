@@ -1,18 +1,17 @@
 import type { NextFunction, Request, Response } from "express";
 
-import { findUserById, toPublicUser } from "../services/user.js";
+import {
+  verifySessionToken,
+  SESSION_COOKIE_NAME,
+} from "../services/auth/session.service.js";
 
 /**
  * optionalAuth
  *
- * Best-effort authentication. If the request carries a valid session (the
- * Reddit OAuth cookie set by /auth/reddit/callback), the corresponding user is
- * attached to `req.user`. If there is no session or it is invalid, the request
- * simply continues as anonymous — public endpoints must never fail here.
- *
- * NOTE: This app authenticates via a PostgreSQL-backed HttpOnly session cookie
- * (express-session), not a bearer token. If token auth is added later, read and
- * validate `Authorization: Bearer <token>` here and attach the same `req.user`.
+ * Best-effort authentication. Reads the httpOnly `yt_session` cookie; if it maps
+ * to a valid, unexpired session the corresponding user is attached to
+ * `req.user`. If there is no cookie or it is invalid, the request simply
+ * continues as anonymous — public endpoints must never fail here.
  */
 export async function optionalAuth(
   req: Request,
@@ -20,10 +19,10 @@ export async function optionalAuth(
   next: NextFunction,
 ): Promise<void> {
   try {
-    const userId = req.session?.userId;
-    if (userId) {
-      const user = await findUserById(userId);
-      if (user) req.user = toPublicUser(user);
+    const token = req.cookies?.[SESSION_COOKIE_NAME];
+    if (typeof token === "string" && token) {
+      const user = await verifySessionToken(token);
+      if (user) req.user = user;
     }
   } catch (err) {
     // Never block a public request because auth lookup failed.

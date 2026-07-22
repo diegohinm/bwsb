@@ -28,8 +28,8 @@ const sessionPool = new Pool({ connectionString: env.DATABASE_URL });
 const PgStore = connectPgSimple(session);
 
 export const sessionMiddleware: RequestHandler = session({
-  name: "stonkterminal.sid",
-  secret: env.SESSION_SECRET,
+  name: "yoloterminal.sid",
+  secret: env.APP_SESSION_SECRET,
   store: new PgStore({
     pool: sessionPool,
     tableName: "session",

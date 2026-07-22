@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import { env } from "../config/env.js";
+import { env, isRedditOAuthConfigured } from "../config/env.js";
 
 /**
  * Reddit OAuth 2.0 (Authorization Code flow).
@@ -7,16 +7,41 @@ import { env } from "../config/env.js";
  * All Reddit OAuth logic lives in the backend. The client secret, access
  * tokens, and identity responses never leave the server. See the Reddit docs:
  * https://github.com/reddit-archive/reddit/wiki/OAuth2
+ *
+ * OAuth is OPTIONAL: the credentials are only present when configured. Every
+ * function that needs them calls getRedditConfig(), which throws if the app is
+ * not configured. Callers (routes) gate on isRedditOAuthConfigured first.
  */
 
 const REDDIT_AUTHORIZE_URL = "https://www.reddit.com/api/v1/authorize";
 const REDDIT_TOKEN_URL = "https://www.reddit.com/api/v1/access_token";
 const REDDIT_IDENTITY_URL = "https://oauth.reddit.com/api/v1/me";
 
-// Reddit requires a unique, descriptive User-Agent or it aggressively rate
-// limits / blocks the request. Format: <platform>:<app id>:<version> (by /u/...).
-// Sourced from env so it can be tuned per-deployment without a code change.
-const USER_AGENT = env.REDDIT_USER_AGENT;
+interface RedditConfig {
+  clientId: string;
+  clientSecret: string;
+  redirectUri: string;
+  userAgent: string;
+}
+
+/** Read the fully-populated Reddit OAuth config, or throw if not configured. */
+function getRedditConfig(): RedditConfig {
+  if (
+    !isRedditOAuthConfigured ||
+    !env.REDDIT_CLIENT_ID ||
+    !env.REDDIT_CLIENT_SECRET ||
+    !env.REDDIT_REDIRECT_URI ||
+    !env.REDDIT_USER_AGENT
+  ) {
+    throw new Error("Reddit OAuth is not configured");
+  }
+  return {
+    clientId: env.REDDIT_CLIENT_ID,
+    clientSecret: env.REDDIT_CLIENT_SECRET,
+    redirectUri: env.REDDIT_REDIRECT_URI,
+    userAgent: env.REDDIT_USER_AGENT,
+  };
+}
 
 /** Generate a cryptographically random `state` value for CSRF protection. */
 export function generateState(): string {
@@ -29,11 +54,12 @@ export function generateState(): string {
  * only read the identity once and then rely on our own session).
  */
 export function buildAuthorizeUrl(state: string): string {
+  const cfg = getRedditConfig();
   const params = new URLSearchParams({
-    client_id: env.REDDIT_CLIENT_ID,
+    client_id: cfg.clientId,
     response_type: "code",
     state,
-    redirect_uri: env.REDDIT_REDIRECT_URI,
+    redirect_uri: cfg.redirectUri,
     duration: "temporary",
     scope: "identity",
   });
@@ -58,14 +84,15 @@ export interface RedditIdentity {
  * it is never persisted or sent to the client.
  */
 export async function exchangeCodeForToken(code: string): Promise<string> {
+  const cfg = getRedditConfig();
   const basicAuth = Buffer.from(
-    `${env.REDDIT_CLIENT_ID}:${env.REDDIT_CLIENT_SECRET}`,
+    `${cfg.clientId}:${cfg.clientSecret}`,
   ).toString("base64");
 
   const body = new URLSearchParams({
     grant_type: "authorization_code",
     code,
-    redirect_uri: env.REDDIT_REDIRECT_URI,
+    redirect_uri: cfg.redirectUri,
   });
 
   const response = await fetch(REDDIT_TOKEN_URL, {
@@ -73,7 +100,7 @@ export async function exchangeCodeForToken(code: string): Promise<string> {
     headers: {
       Authorization: `Basic ${basicAuth}`,
       "Content-Type": "application/x-www-form-urlencoded",
-      "User-Agent": USER_AGENT,
+      "User-Agent": cfg.userAgent,
     },
     body,
   });
@@ -108,7 +135,7 @@ export async function fetchRedditIdentity(
   const response = await fetch(REDDIT_IDENTITY_URL, {
     headers: {
       Authorization: `Bearer ${accessToken}`,
-      "User-Agent": USER_AGENT,
+      "User-Agent": getRedditConfig().userAgent,
     },
   });
 

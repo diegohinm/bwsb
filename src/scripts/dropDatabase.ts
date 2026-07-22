@@ -1,12 +1,15 @@
 /**
  * dropDatabase.ts
  *
- * Drops all StonkTerminal / wsb project tables so `db:reset` can rebuild them
+ * Drops all YoloTerminal / wsb project tables so `db:reset` can rebuild them
  * from scratch. CASCADE takes care of foreign-key dependencies.
  *
- * The auth tables `users` and `session` are intentionally PRESERVED — dropping
- * them would destroy user accounts and log everyone out. `db:setup` re-creates
- * `users` with IF NOT EXISTS regardless.
+ * The auth tables are intentionally PRESERVED — dropping them would destroy user
+ * accounts and log everyone out. This covers the legacy `users`/`session` tables
+ * and the email-auth tables (`app_users`, `user_sessions`,
+ * `email_verification_tokens`, `password_reset_tokens`, `reddit_accounts`,
+ * `reddit_verification_requests`, `auth_events`). `db:setup` re-creates all of
+ * them with IF NOT EXISTS regardless.
  *
  * SERVER-SIDE ONLY. Reads DATABASE_URL and never logs its value.
  */
@@ -114,7 +117,7 @@ async function main() {
     console.log("Connecting to database...");
     await client.connect();
 
-    console.log("Dropping StonkTerminal / wsb project tables...");
+    console.log("Dropping YoloTerminal / wsb project tables...");
     await client.query("begin");
     await client.query(dropSql);
     await client.query("commit");
