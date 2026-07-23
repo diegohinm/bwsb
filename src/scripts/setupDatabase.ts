@@ -1,7 +1,7 @@
 /**
  * setupDatabase.ts
  *
- * Creates the full database schema for bwsb (backend for YoloTerminal, internal
+ * Creates the full database schema for bwsb (backend for YOLOPulse, internal
  * project "wsb"). Idempotent — every statement uses IF NOT EXISTS so it is safe
  * to run repeatedly.
  *

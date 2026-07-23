@@ -1,7 +1,7 @@
 /**
  * dropDatabase.ts
  *
- * Drops all YoloTerminal / wsb project tables so `db:reset` can rebuild them
+ * Drops all YOLOPulse / wsb project tables so `db:reset` can rebuild them
  * from scratch. CASCADE takes care of foreign-key dependencies.
  *
  * The auth tables are intentionally PRESERVED — dropping them would destroy user
@@ -117,7 +117,7 @@ async function main() {
     console.log("Connecting to database...");
     await client.connect();
 
-    console.log("Dropping YoloTerminal / wsb project tables...");
+    console.log("Dropping YOLOPulse / wsb project tables...");
     await client.query("begin");
     await client.query(dropSql);
     await client.query("commit");

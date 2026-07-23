@@ -1,7 +1,7 @@
 /**
  * seedDatabase.ts
  *
- * Seeds deterministic development data for bwsb (YoloTerminal / wsb).
+ * Seeds deterministic development data for bwsb (YOLOPulse / wsb).
  * All data is FAKE:
  *   - No real Reddit usernames — authors are fake `dev_author_*` hashes.
  *   - Post ids are deterministic `dev_post_*` values.
@@ -528,7 +528,7 @@ ON CONFLICT (user_id, day) DO UPDATE SET summary=EXCLUDED.summary, highlights=EX
 
 DELETE FROM public.webhook_subscriptions WHERE user_id = '${DEMO_USER_ID}';
 INSERT INTO public.webhook_subscriptions (user_id, target_url, event_types, is_active)
-VALUES ('${DEMO_USER_ID}','https://example.com/webhooks/yoloterminal','["alert.created","bet.verified"]', true);
+VALUES ('${DEMO_USER_ID}','https://example.com/webhooks/yolopulse','["alert.created","bet.verified"]', true);
 `;
 
 // One demo competition for the paper-trading league. Fixed id keeps it
@@ -537,8 +537,8 @@ const COMPETITION_SQL = /* sql */ `
 INSERT INTO public.competitions (id, name, description, starting_cash, is_active, starts_at, ends_at)
 VALUES (
   '40000000-0000-0000-0000-000000000001',
-  'YoloTerminal Paper Trading League',
-  'Virtual trading only. No real money. Compete on paper-trading returns against other YoloTerminal users.',
+  'YOLOPulse Paper Trading League',
+  'Virtual trading only. No real money. Compete on paper-trading returns against other YOLOPulse users.',
   100000, true, now() - interval '7 days', now() + interval '30 days'
 )
 ON CONFLICT (id) DO UPDATE SET
