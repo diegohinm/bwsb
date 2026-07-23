@@ -1,8 +1,8 @@
 export const BRANDING = {
-  productName: "YoloTerminal",
+  productName: "YoloPulse",
   oldProductName: "StonkTerminal",
   internalProjectName: "wsb",
   backendName: "bwsb",
   frontendName: "fwsb",
-  serviceName: "yoloterminal-bwsb",
+  serviceName: "yolopulse-bwsb",
 } as const;

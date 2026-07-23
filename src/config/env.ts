@@ -73,7 +73,7 @@ const envSchema = z.object({
   // ── Email (verification + password reset) ──────────────────────────────────
   EMAIL_FROM: z
     .string()
-    .default("YoloTerminal <no-reply@yoloterminal.com>"),
+    .default("YoloPulse <no-reply@yolopulse.com>"),
   SMTP_HOST: optionalNonEmpty,
   SMTP_PORT: z.coerce.number().int().positive().optional(),
   SMTP_USER: optionalNonEmpty,
