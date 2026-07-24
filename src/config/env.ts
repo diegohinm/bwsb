@@ -62,7 +62,7 @@ const envSchema = z.object({
     .string()
     .min(1, { message: "SUPABASE_SERVICE_ROLE_KEY is required" }),
 
-  // Session signing secret for the new email-auth session cookie (yp_session)
+  // Session signing secret for the new email-auth session cookie (yt_session)
   // and the legacy express-session cookie. Defaulted in non-production so the
   // backend always starts locally; set a strong value in production.
   APP_SESSION_SECRET: z

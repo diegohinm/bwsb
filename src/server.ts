@@ -53,7 +53,7 @@ app.use(
 // Body parsing.
 app.use(express.json());
 
-// Cookie parsing — required before optionalAuth reads the yp_session cookie.
+// Cookie parsing — required before optionalAuth reads the yt_session cookie.
 app.use(cookieParser());
 
 // Legacy express-session (PostgreSQL-backed) — retained only for the optional/

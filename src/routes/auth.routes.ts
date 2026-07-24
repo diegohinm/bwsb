@@ -19,6 +19,11 @@ import {
 } from "../services/auth/session.service.js";
 import { logAuthEvent } from "../services/auth/authEvents.service.js";
 import {
+  isDevOutboxEnabled,
+  listDevEmails,
+  latestDevEmailFor,
+} from "../services/email/devOutbox.js";
+import {
   buildAuthorizeUrl,
   exchangeCodeForToken,
   fetchRedditIdentity,
@@ -131,7 +136,7 @@ authRouter.post(
 /**
  * POST /auth/email/login
  * Body: { email, password }
- * Sets the yp_session cookie and returns the user.
+ * Sets the yt_session cookie and returns the user.
  */
 authRouter.post(
   "/email/login",
@@ -185,7 +190,7 @@ authRouter.post(
 
 /**
  * GET /auth/me
- * Returns the current user (from the yp_session cookie) or null.
+ * Returns the current user (from the yt_session cookie) or null.
  */
 authRouter.get(
   "/me",
@@ -230,6 +235,47 @@ authRouter.post(
     }
   }),
 );
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Dev-only email outbox (verification / reset links)
+// ═══════════════════════════════════════════════════════════════════════════
+// When email runs in console mode (dev), the verification / reset links are only
+// printed to the backend console. These endpoints expose the captured links so
+// the full signup → set-password → login → reset flow can be exercised in QA
+// WITHOUT a real inbox. They return 404 in production or once real SMTP is
+// configured (see isDevOutboxEnabled), so genuine one-time links are never
+// served over HTTP in a real deployment.
+
+/** GET /auth/dev/outbox — recent dev emails (newest first). Dev/console only. */
+authRouter.get("/dev/outbox", (_req: Request, res: Response) => {
+  if (!isDevOutboxEnabled()) {
+    res.status(404).json({ error: "Dev outbox is disabled" });
+    return;
+  }
+  res.json({ enabled: true, emails: listDevEmails() });
+});
+
+/**
+ * GET /auth/dev/last-email?email=... — most recent dev email + link for a
+ * recipient. Dev/console only.
+ */
+authRouter.get("/dev/last-email", (req: Request, res: Response) => {
+  if (!isDevOutboxEnabled()) {
+    res.status(404).json({ error: "Dev outbox is disabled" });
+    return;
+  }
+  const email = typeof req.query.email === "string" ? req.query.email : "";
+  if (!email) {
+    res.status(400).json({ error: "Provide ?email=" });
+    return;
+  }
+  const entry = latestDevEmailFor(email);
+  if (!entry) {
+    res.status(404).json({ error: "No dev email found for that address" });
+    return;
+  }
+  res.json(entry);
+});
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Reddit OAuth (OPTIONAL / future — disabled until configured)

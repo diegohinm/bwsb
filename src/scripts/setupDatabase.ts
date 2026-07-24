@@ -79,7 +79,7 @@ CREATE TABLE IF NOT EXISTS public.app_users (
 );
 
 -- Opaque session tokens (sha256-hashed). The raw token lives only in the
--- httpOnly yp_session cookie and is never stored.
+-- httpOnly yt_session cookie and is never stored.
 CREATE TABLE IF NOT EXISTS public.user_sessions (
   id                 uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   user_id            uuid NOT NULL REFERENCES public.app_users(id) ON DELETE CASCADE,

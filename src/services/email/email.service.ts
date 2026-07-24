@@ -1,6 +1,7 @@
 import nodemailer, { type Transporter } from "nodemailer";
 import { env, isProduction } from "../../config/env.js";
 import { BRANDING } from "../../config/branding.js";
+import { recordDevEmail } from "./devOutbox.js";
 
 /**
  * Transactional email (verification links + password resets).
@@ -45,6 +46,9 @@ interface Mail {
 
 async function deliver(mail: Mail): Promise<void> {
   if (useConsoleMode()) {
+    // Capture the email (with its link) in the dev-only in-memory outbox so the
+    // full auth flow can be exercised without a real inbox. No-op in production.
+    recordDevEmail({ to: mail.to, subject: mail.subject, text: mail.text });
     // Never print secrets; the link itself is the one-time token holder.
     console.log(
       [

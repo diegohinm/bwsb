@@ -2,6 +2,7 @@ import { Router } from "express";
 
 import { ok, fail, asyncHandler } from "../lib/response.js";
 import { tickersRepository } from "../repositories/tickers.repository.js";
+import { catalogTicker } from "../config/tickerCatalog.js";
 import { mentionsRepository } from "../repositories/mentions.repository.js";
 import { betsRepository } from "../repositories/bets.repository.js";
 import { metricsRepository } from "../repositories/metrics.repository.js";
@@ -32,8 +33,28 @@ tickersRouter.get(
   "/tickers/:ticker/overview",
   asyncHandler(async (req, res) => {
     const symbol = req.params.ticker.toUpperCase();
-    const ticker = await tickersRepository.findByTicker(symbol);
+
+    // Resolve from the DB; fall back to the centralized catalog so well-known
+    // symbols render a detail page even when the tickers table is unseeded.
+    let ticker = null;
+    try {
+      ticker = await tickersRepository.findByTicker(symbol);
+    } catch (err) {
+      console.error(`findByTicker(${symbol}) failed:`, err);
+    }
+    ticker = ticker ?? catalogTicker(symbol);
     if (!ticker) return fail(res, "Ticker not found", 404);
+
+    // Each aggregate source is best-effort: a slow/failing DB query degrades to
+    // an empty section instead of 500-ing (and hanging) the whole page.
+    const safe = async <T>(p: Promise<T>, fallback: T): Promise<T> => {
+      try {
+        return await p;
+      } catch (err) {
+        console.error(`Ticker overview sub-query failed for ${symbol}:`, err);
+        return fallback;
+      }
+    };
 
     const [
       market,
@@ -48,17 +69,17 @@ tickersRouter.get(
       shortInterest,
       catalysts,
     ] = await Promise.all([
-      marketRepository.latestSnapshot(symbol),
-      metricsRepository.latest5mForTicker(symbol),
-      mentionsRepository.stanceSplit(symbol),
-      metricsRepository.positioningForTicker(symbol),
-      metricsRepository.pumpForTicker(symbol),
-      tickersRepository.narratives(symbol),
-      tickersRepository.ddQuality(symbol),
-      tickersRepository.dailyMetrics(symbol, 14),
-      alertsRepository.forTicker(symbol),
-      marketRepository.shortInterest(symbol),
-      marketRepository.catalystsForTicker(symbol),
+      safe(marketRepository.latestSnapshot(symbol), null),
+      safe(metricsRepository.latest5mForTicker(symbol), null),
+      safe(mentionsRepository.stanceSplit(symbol), [] as unknown[]),
+      safe(metricsRepository.positioningForTicker(symbol), null),
+      safe(metricsRepository.pumpForTicker(symbol), null),
+      safe(tickersRepository.narratives(symbol), [] as unknown[]),
+      safe(tickersRepository.ddQuality(symbol), [] as unknown[]),
+      safe(tickersRepository.dailyMetrics(symbol, 14), [] as unknown[]),
+      safe(alertsRepository.forTicker(symbol), [] as unknown[]),
+      safe(marketRepository.shortInterest(symbol), null),
+      safe(marketRepository.catalystsForTicker(symbol), [] as unknown[]),
     ]);
 
     return ok(res, {

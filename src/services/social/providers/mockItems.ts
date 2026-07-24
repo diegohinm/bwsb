@@ -96,8 +96,11 @@ function fill(template: string, ticker: string): string {
 export function buildMockItems(timeframe: PulseTimeframe): SocialPostItem[] {
   const volume = TIMEFRAME_VOLUME[timeframe];
   const windowMs = TIMEFRAME_MS[timeframe];
-  // Fixed "now" derived from the timeframe so output is stable across calls.
-  const now = 1_700_000_000_000;
+  // "now" bucketed to the minute: stable across nearby calls (so the page
+  // doesn't flicker and two clients see the same snapshot) yet anchored to the
+  // real clock, so item ages read as recent — coherent with the response's
+  // `updatedAt`. A fixed absolute epoch here made demo posts appear ~years old.
+  const now = Math.floor(Date.now() / 60_000) * 60_000;
   const items: SocialPostItem[] = [];
 
   for (const sub of TRACKED_SUBREDDITS) {

@@ -18,7 +18,11 @@
     "db:reset": "npm run db:drop && npm run db:setup && npm run db:seed",
     "market:refresh": "tsx src/jobs/refreshMarketData.job.ts",
     "portfolio:recalculate": "tsx src/jobs/recalculatePortfolioPnL.job.ts",
-    "movers:refresh": "tsx src/jobs/refreshMarketMovers.job.ts"
+    "movers:refresh": "tsx src/jobs/refreshMarketMovers.job.ts",
+    "leaderboard:recalculate": "tsx src/jobs/recalculateLeaderboard.job.ts",
+    "tokens:expire": "tsx src/jobs/expireAuthTokens.job.ts",
+    "social:refresh": "tsx src/jobs/refreshSocialCache.job.ts",
+    "jobs:all": "npm run portfolio:recalculate && npm run leaderboard:recalculate && npm run tokens:expire && npm run market:refresh && npm run movers:refresh && npm run social:refresh"
   },
   "dependencies": {
     "@prisma/client": "^6.19.3",

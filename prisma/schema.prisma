@@ -1,4 +1,4 @@
-// Prisma schema for bwsb (backend for YoloTerminal, internal project "wsb").
+// Prisma schema for bwsb (backend for YOLOPulse, internal project "wsb").
 //
 // The datasource points at DATABASE_URL, which MUST be a PostgreSQL connection
 // string (server-side only, never exposed to the frontend). Reddit is the only
