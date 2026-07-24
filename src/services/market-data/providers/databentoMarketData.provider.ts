@@ -1,5 +1,6 @@
 import { env } from "../../../config/env.js";
 import type { MarketDataProvider } from "../marketData.provider.js";
+import { DATABENTO_CONFIG } from "./databento.config.js";
 import { currentSession, round2 } from "../marketData.util.js";
 import type {
   AssetType,
@@ -23,12 +24,14 @@ import type {
  *    mock fallback uniformly for every provider. This class only fetches and
  *    maps, and throws a typed error when misconfigured or on failure so the
  *    service can fall back to mock safely.
- *  - Dataset/schema names are account-specific and fully env-driven — see
- *    DATABENTO_*_DATASET / DATABENTO_*_SCHEMA. Nothing here hardcodes them.
- *  - Live streaming (DATABENTO_LIVE_ENABLED) uses a different runtime/protocol
- *    (raw TCP + zstd DBN) that doesn't fit a request/response Express handler;
- *    it is intentionally left as a documented boundary (see `liveStreamTODO`).
- *    The REST/historical path below is the supported MVP surface.
+ *  - Datasets/schemas come from the internal DATABENTO_CONFIG (see
+ *    databento.config.ts). Only the API key and the two dataset ids are env
+ *    driven; every other value (base URL, schemas, options dataset, symbology
+ *    types, live/real-time toggles) is a code default so the .env stays minimal.
+ *  - Live streaming uses a different runtime/protocol (raw TCP + zstd DBN) that
+ *    doesn't fit a request/response Express handler; it is intentionally left as
+ *    a documented boundary (see `liveStreamTODO`). The REST/historical path below
+ *    is the supported MVP surface.
  *
  * NOTE: Databento's exact HTTP timeseries response shape is account/schema
  * dependent and could not be validated live here. `mapRecord` reads defensively
@@ -60,20 +63,22 @@ export class DatabentoMarketDataProvider implements MarketDataProvider {
     return env.DATABENTO_API_KEY;
   }
   private get baseUrl(): string {
-    return (env.DATABENTO_BASE_URL || "https://hist.databento.com").replace(/\/+$/, "");
+    return DATABENTO_CONFIG.baseUrl.replace(/\/+$/, "");
   }
-  private get equitiesDataset(): string | undefined {
-    return env.DATABENTO_EQUITIES_DATASET;
+  private get equitiesDataset(): string {
+    return DATABENTO_CONFIG.equitiesDataset;
   }
 
-  /** Ready only when the API key AND the core equities dataset are present. */
+  /**
+   * Ready when the API key is present. The equities/overnight datasets always
+   * have internal defaults, so the API key is the only thing that can be missing.
+   */
   private get configured(): boolean {
-    return Boolean(this.apiKey && this.equitiesDataset);
+    return Boolean(this.apiKey);
   }
 
   private missing(): string {
     if (!this.apiKey) return "DATABENTO_API_KEY";
-    if (!this.equitiesDataset) return "DATABENTO_EQUITIES_DATASET";
     return "";
   }
 
@@ -135,27 +140,30 @@ export class DatabentoMarketDataProvider implements MarketDataProvider {
     session?: MarketSession | "all";
   }): Promise<MarketCandle[]> {
     if (!this.configured) throw new DatabentoNotConfiguredError(this.missing());
-    const schema = ohlcvSchema(params.timeframe);
+    const overnight = params.session === "overnight";
     const rows = await this.request({
-      dataset: this.equitiesDataset!,
+      // Overnight candles come from the dedicated overnight dataset/schema.
+      dataset: overnight ? DATABENTO_CONFIG.overnightDataset : this.equitiesDataset,
       symbols: params.symbol.toUpperCase(),
-      schema,
+      schema: overnight ? DATABENTO_CONFIG.overnightSchema : ohlcvSchema(params.timeframe),
       start: params.from,
       end: params.to,
     });
     return rows.map((r) => this.mapCandle(params.symbol.toUpperCase(), r));
   }
 
-  async getMarketMovers(_params: {
+  async getMarketMovers(params: {
     session: MarketSession | "all";
     limit?: number;
   }): Promise<MarketMover[]> {
     if (!this.configured) throw new DatabentoNotConfiguredError(this.missing());
     // Databento is a raw market-data feed, not a curated "movers" screener.
-    // Computing movers requires a universe scan + ranking job that is out of
-    // scope for the request path — surface as unavailable so the service falls
-    // back to the mock movers instead of blocking the page.
-    throw new Error("Databento movers require a batch screener job (not implemented)");
+    // Computing movers (day OR overnight, via DATABENTO_OVERNIGHT_DATASET)
+    // requires a universe scan + ranking batch job that is out of scope for the
+    // request path — surface as unavailable so the service falls back to the mock
+    // movers (with the right warning) instead of blocking the page.
+    const scope = params.session === "overnight" ? "overnight " : "";
+    throw new Error(`Databento ${scope}movers require a batch screener job (not implemented)`);
   }
 
   async getOptionChain(_params: {
@@ -165,14 +173,11 @@ export class DatabentoMarketDataProvider implements MarketDataProvider {
     minStrike?: number;
     maxStrike?: number;
   }): Promise<OptionChainResponse> {
-    if (!this.apiKey || !env.DATABENTO_OPTIONS_DATASET) {
-      throw new DatabentoNotConfiguredError(
-        !this.apiKey ? "DATABENTO_API_KEY" : "DATABENTO_OPTIONS_DATASET",
-      );
-    }
+    if (!this.apiKey) throw new DatabentoNotConfiguredError("DATABENTO_API_KEY");
     // A full OPRA chain reconstruction from raw records is a substantial job and
     // is OPRA-license sensitive; keep it behind the service's options gating and
-    // fall back to mock/EOD until a chain-builder is implemented.
+    // fall back to mock/EOD until a chain-builder is implemented. The options
+    // dataset/schema live in DATABENTO_CONFIG, not the environment.
     throw new Error("Databento option-chain reconstruction not implemented");
   }
 
@@ -180,14 +185,13 @@ export class DatabentoMarketDataProvider implements MarketDataProvider {
 
   /** Latest equities record(s) for symbols, via the configured dataset/schema. */
   private async fetchEquities(symbols: string[]): Promise<DbRecord[]> {
-    const schema = env.DATABENTO_EQUITIES_SCHEMA || "trades";
     // Small trailing window; the service caches so this isn't hit per refresh.
     const end = new Date().toISOString();
     const start = new Date(Date.now() - 6 * 60 * 60 * 1000).toISOString();
     return this.request({
-      dataset: this.equitiesDataset!,
+      dataset: this.equitiesDataset,
       symbols: symbols.join(","),
-      schema,
+      schema: DATABENTO_CONFIG.equitiesSchema,
       start,
       end,
     });
@@ -253,15 +257,16 @@ export class DatabentoMarketDataProvider implements MarketDataProvider {
     start: string;
     end: string;
   }): Promise<DbRecord[]> {
-    const url = `${this.baseUrl}/v0/timeseries.get_range`;
+    // baseUrl already includes the /v0 API version segment (see DATABENTO_CONFIG).
+    const url = `${this.baseUrl}/timeseries.get_range`;
     const body = new URLSearchParams({
       dataset: query.dataset,
       symbols: query.symbols,
       schema: query.schema,
       start: query.start,
       end: query.end,
-      stype_in: env.DATABENTO_DEFAULT_STYPE_IN || "raw_symbol",
-      stype_out: env.DATABENTO_DEFAULT_STYPE_OUT || "instrument_id",
+      stype_in: DATABENTO_CONFIG.stypeIn,
+      stype_out: DATABENTO_CONFIG.stypeOut,
       encoding: "json",
     });
 
@@ -306,7 +311,7 @@ export class DatabentoMarketDataProvider implements MarketDataProvider {
 
 /** Live streaming boundary — see class docs. Not wired into the request path. */
 export const liveStreamTODO =
-  "Databento live streaming (DATABENTO_LIVE_ENABLED) requires a persistent DBN/zstd TCP client and a separate ingestion process; wire it as a background service, not an Express handler.";
+  "Databento live streaming (DATABENTO_CONFIG.liveEnabled) requires a persistent DBN/zstd TCP client and a separate ingestion process; wire it as a background service, not an Express handler.";
 
 function ohlcvSchema(tf: CandleTimeframe): string {
   switch (tf) {

@@ -22,28 +22,36 @@ import type {
  */
 
 const TTL = env.MARKET_DATA_CACHE_TTL_SECONDS;
-const OPTIONS_TTL = Math.max(60, env.OPTIONS_CACHE_TTL_SECONDS);
+// Options are cached longer than equities. Internal default — no env var.
+const OPTIONS_TTL = 60;
 
-// ── License flags (env-driven, all default false) ────────────────────────────
-const licenseConfirmed = env.MARKET_DATA_LICENSE_CONFIRMED;
-export const realtimeEnabled = licenseConfirmed && env.MARKET_DATA_ALLOW_PUBLIC_REALTIME;
-export const optionsRealtimeEnabled =
-  licenseConfirmed && env.MARKET_DATA_ALLOW_PUBLIC_OPTIONS_REALTIME;
-export const overnightEnabled = licenseConfirmed && env.MARKET_DATA_ALLOW_PUBLIC_OVERNIGHT;
+// ── Safety flags (internal defaults — see providers/databento.config.ts) ─────
+// Public real-time / options-real-time display stay OFF: data is presented as
+// delayed / EOD / demo and NEVER labeled real-time without a deliberate code
+// change. `MARKET_DATA_MODE=realtime` alone does not lift this — the internal
+// PUBLIC_REALTIME gate must also be true.
+const PUBLIC_REALTIME = false;
+const PUBLIC_OPTIONS_REALTIME = false;
+export const realtimeEnabled = PUBLIC_REALTIME && env.MARKET_DATA_MODE === "realtime";
+export const optionsRealtimeEnabled = PUBLIC_OPTIONS_REALTIME;
+// Overnight support is provided by the Databento overnight dataset. It is
+// "enabled" (attempted from the real provider) whenever Databento is configured;
+// if the overnight feed is unavailable the service serves demo data + a warning.
+export const overnightEnabled = env.MARKET_DATA_PROVIDER === "databento";
 
-const WARN_REALTIME =
-  "Real-time public display is disabled until market data license is confirmed.";
-const WARN_OVERNIGHT = "Overnight public display is disabled until license is confirmed.";
-const WARN_OPTIONS =
-  "Options real-time display is disabled until OPRA/options license is confirmed.";
-const WARN_FALLBACK = "Market data provider unavailable. Showing demo data.";
-const WARN_MISCONFIGURED = "Market data provider is not configured. Showing demo data.";
+const WARN_DELAYED = "Market data is delayed (safe mode), not real-time.";
+const WARN_OPTIONS = "Options data is delayed/EOD, not real-time.";
+const WARN_FALLBACK = "Databento market data unavailable. Showing demo data.";
+const WARN_MISCONFIGURED =
+  "Databento is not configured (missing API key). Showing demo data.";
+const WARN_OVERNIGHT_FALLBACK = "Databento overnight data unavailable. Showing demo data.";
 
-/** Effective equities display mode given the license flags. */
+/** Effective equities display mode. `realtime` downgrades to `delayed` in safe mode. */
 function equityDisplayMode(): MarketDataDisplayMode {
-  return realtimeEnabled ? "realtime" : "delayed";
+  if (env.MARKET_DATA_MODE === "realtime" && !realtimeEnabled) return "delayed";
+  return env.MARKET_DATA_MODE;
 }
-/** Effective options display mode given the license flags. */
+/** Effective options display mode (EOD unless options real-time is enabled). */
 function optionsDisplayMode(): MarketDataDisplayMode {
   return optionsRealtimeEnabled ? "realtime" : "end_of_day";
 }
@@ -118,9 +126,10 @@ export async function getMarketDataDiagnostics() {
   return {
     ...status,
     configuredProvider: env.MARKET_DATA_PROVIDER,
+    mode: env.MARKET_DATA_MODE,
     cacheTtlSeconds: TTL,
     optionsCacheTtlSeconds: OPTIONS_TTL,
-    licenseConfirmed,
+    overnightSupported: overnightEnabled,
     lastSuccessAt: diagnostics.lastSuccessAt,
     lastErrorAt: diagnostics.lastErrorAt,
     lastError: diagnostics.lastError,
@@ -130,24 +139,15 @@ export async function getMarketDataDiagnostics() {
 
 // ── Quotes ───────────────────────────────────────────────────────────────────
 
-/** Apply real-time license labeling + warnings to a real-provider quote. */
+/** Apply display-mode labeling + safe-mode warnings to a real-provider quote. */
 function labelQuote(q: MarketQuote): MarketQuote {
   const mode = equityDisplayMode();
   return {
     ...q,
     displayMode: mode,
     isDelayed: mode !== "realtime",
-    ...(mode !== "realtime" ? { warning: WARN_REALTIME } : {}),
+    ...(mode === "delayed" ? { warning: WARN_DELAYED } : {}),
   };
-}
-
-/**
- * True when the live overnight session must NOT be shown from a real provider
- * (unlicensed). Callers serve genuine mock data with the overnight warning so
- * no real overnight prints leak into the UI.
- */
-function overnightGated(): boolean {
-  return !isMockProvider() && currentSession() === "overnight" && !overnightEnabled;
 }
 
 export async function getQuote(symbol: string): Promise<MarketQuote> {
@@ -160,10 +160,6 @@ export async function getQuote(symbol: string): Promise<MarketQuote> {
   let result: MarketQuote;
   if (isMockProvider()) {
     result = await mockMarketDataProvider.getQuote(sym);
-    recordSuccess(true);
-  } else if (overnightGated()) {
-    result = await mockMarketDataProvider.getQuote(sym);
-    result.warning = WARN_OVERNIGHT;
     recordSuccess(true);
   } else {
     try {
@@ -191,10 +187,6 @@ export async function getQuotes(symbols: string[]): Promise<MarketQuote[]> {
   let result: MarketQuote[];
   if (isMockProvider()) {
     result = await mockMarketDataProvider.getQuotes(syms);
-    recordSuccess(true);
-  } else if (overnightGated()) {
-    const mocks = await mockMarketDataProvider.getQuotes(syms);
-    result = mocks.map((q) => ({ ...q, warning: WARN_OVERNIGHT }));
     recordSuccess(true);
   } else {
     try {
@@ -257,6 +249,14 @@ export async function getCandles(params: {
 
 // ── Movers ───────────────────────────────────────────────────────────────────
 
+export interface MarketMoversMeta {
+  provider: string;
+  source: string;
+  displayMode: MarketDataDisplayMode;
+  isMock: boolean;
+  warning: string | null;
+}
+
 export interface MarketMoversResponse {
   session: MarketSession;
   provider: string;
@@ -266,7 +266,53 @@ export interface MarketMoversResponse {
   overnightEnabled: boolean;
   updatedAt: string;
   warning?: string;
+  // Structured provenance for clients that prefer a single meta object. Mirrors
+  // the top-level fields (kept for backward compatibility).
+  meta: MarketMoversMeta;
   movers: MarketMover[];
+}
+
+/** Stamp each mover with its own source/session/displayMode so rows self-describe. */
+function labelMovers(
+  movers: MarketMover[],
+  info: { session: MarketSession; source: string; displayMode: MarketDataDisplayMode },
+): MarketMover[] {
+  return movers.map((m) => ({
+    ...m,
+    session: info.session,
+    source: info.source,
+    displayMode: info.displayMode,
+  }));
+}
+
+function buildMoversResponse(args: {
+  session: MarketSession;
+  provider: string;
+  source: string;
+  displayMode: MarketDataDisplayMode;
+  isMock: boolean;
+  updatedAt: string;
+  warning?: string;
+  movers: MarketMover[];
+}): MarketMoversResponse {
+  const { warning, ...rest } = args;
+  return {
+    ...rest,
+    overnightEnabled,
+    ...(warning ? { warning } : {}),
+    meta: {
+      provider: args.provider,
+      source: args.source,
+      displayMode: args.displayMode,
+      isMock: args.isMock,
+      warning: warning ?? null,
+    },
+    movers: labelMovers(args.movers, {
+      session: args.session,
+      source: args.source,
+      displayMode: args.displayMode,
+    }),
+  };
 }
 
 export async function getMarketMovers(params: {
@@ -280,69 +326,56 @@ export async function getMarketMovers(params: {
   if (cached) return cached;
 
   const updatedAt = new Date().toISOString();
-
-  // Overnight movers are license-gated regardless of provider.
-  if (session === "overnight" && !overnightEnabled) {
-    const movers = await mockMarketDataProvider.getMarketMovers({ session, limit });
-    const resp: MarketMoversResponse = {
-      session,
-      provider: "mock",
-      source: "mock",
-      displayMode: "mock",
-      isMock: true,
-      overnightEnabled,
-      updatedAt,
-      warning: WARN_OVERNIGHT,
-      movers,
-    };
-    memoryCache.set(key, resp, TTL);
-    return resp;
-  }
+  const isOvernight = session === "overnight";
 
   let resp: MarketMoversResponse;
   if (isMockProvider()) {
     const movers = await mockMarketDataProvider.getMarketMovers({ session, limit });
-    resp = {
+    resp = buildMoversResponse({
       session,
       provider: "mock",
       source: "mock",
       displayMode: "mock",
       isMock: true,
-      overnightEnabled,
       updatedAt,
       movers,
-    };
+    });
     recordSuccess(true);
   } else {
     try {
+      // Real provider — for overnight this uses the Databento overnight dataset.
       const movers = await getMarketDataProvider().getMarketMovers({ session, limit });
       const mode = equityDisplayMode();
-      resp = {
+      resp = buildMoversResponse({
         session,
         provider: env.MARKET_DATA_PROVIDER,
         source: env.MARKET_DATA_PROVIDER,
         displayMode: mode,
         isMock: false,
-        overnightEnabled,
         updatedAt,
-        ...(mode !== "realtime" ? { warning: WARN_REALTIME } : {}),
+        ...(mode === "delayed" ? { warning: WARN_DELAYED } : {}),
         movers,
-      };
+      });
       recordSuccess(false);
     } catch (err) {
-      recordError(err);
+      const msg = recordError(err);
+      // Fall back to demo movers with a session-appropriate warning.
       const movers = await mockMarketDataProvider.getMarketMovers({ session, limit });
-      resp = {
+      const warning = isOvernight
+        ? WARN_OVERNIGHT_FALLBACK
+        : /not configured/i.test(msg)
+          ? WARN_MISCONFIGURED
+          : WARN_FALLBACK;
+      resp = buildMoversResponse({
         session,
         provider: "mock",
         source: "mock",
         displayMode: "mock",
         isMock: true,
-        overnightEnabled,
         updatedAt,
-        warning: WARN_FALLBACK,
+        warning,
         movers,
-      };
+      });
       recordSuccess(true);
     }
   }

@@ -118,42 +118,34 @@ const envSchema = z.object({
   SOCIAL_DATA_CACHE_TTL_SECONDS: z.coerce.number().int().positive().optional(),
   SOCIAL_CACHE_TTL_SECONDS: z.coerce.number().int().positive().optional(),
 
-  // ── Market data provider (equities / extended-hours / options) ─────────────
+  // ── Market data provider (equities + overnight) ────────────────────────────
   // Fully separate from the social/pulse provider above. Provider keys are read
-  // only here (backend) and never sent to the frontend. Real-time, overnight and
-  // options-real-time PUBLIC display are gated by the license flags below — the
-  // service refuses to present those modes unless explicitly confirmed.
+  // only here (backend) and never sent to the frontend.
+  //
+  // INTENTIONALLY MINIMAL: the ONLY market-data env vars are the six below.
+  // Everything else — Databento base URL, equities/overnight/options schemas,
+  // the options dataset, symbology types, and the live/real-time/overnight
+  // PUBLIC toggles — lives as internal defaults in code (see
+  // services/market-data/providers/databento.config.ts). Change those constants,
+  // not the environment, to retune Databento.
   //   mock | databento | polygon | alpaca | twelvedata
   MARKET_DATA_PROVIDER: z
     .enum(["mock", "databento", "polygon", "alpaca", "twelvedata"])
     .default("mock"),
-  MARKET_DATA_CACHE_TTL_SECONDS: z.coerce.number().int().positive().default(5),
-  OPTIONS_CACHE_TTL_SECONDS: z.coerce.number().int().positive().default(60),
-  MARKET_DATA_DISPLAY_MODE: z
+  // Display/safety mode. `delayed` is the safe default; `realtime` is never
+  // presented publicly in safe mode (see marketData.service) so nothing is ever
+  // labeled real-time without an explicit internal-config change.
+  MARKET_DATA_MODE: z
     .enum(["mock", "delayed", "realtime", "end_of_day"])
     .default("delayed"),
+  MARKET_DATA_CACHE_TTL_SECONDS: z.coerce.number().int().positive().default(10),
 
-  // Legal license flags. All default false — nothing sensitive is ever enabled
-  // implicitly. Real-time/overnight/options-real-time public display each
-  // require LICENSE_CONFIRMED=true AND their specific ALLOW_* flag.
-  MARKET_DATA_LICENSE_CONFIRMED: boolFromString(false),
-  MARKET_DATA_ALLOW_PUBLIC_REALTIME: boolFromString(false),
-  MARKET_DATA_ALLOW_PUBLIC_OPTIONS_REALTIME: boolFromString(false),
-  MARKET_DATA_ALLOW_PUBLIC_OVERNIGHT: boolFromString(false),
-
-  // Databento — backend-only credentials + account-specific dataset/schema ids.
+  // Databento — backend-only. The API key plus the two account-specific dataset
+  // ids are the ONLY Databento env vars. Blank key = misconfigured → mock
+  // fallback (the app never crashes). Schemas/URL/options/flags are code defaults.
   DATABENTO_API_KEY: optionalNonEmpty,
-  DATABENTO_BASE_URL: optionalNonEmpty,
-  DATABENTO_LIVE_ENABLED: boolFromString(false),
-  DATABENTO_EQUITIES_DATASET: optionalNonEmpty,
-  DATABENTO_EXTENDED_HOURS_DATASET: optionalNonEmpty,
+  DATABENTO_DATASET: optionalNonEmpty,
   DATABENTO_OVERNIGHT_DATASET: optionalNonEmpty,
-  DATABENTO_OPTIONS_DATASET: optionalNonEmpty,
-  DATABENTO_EQUITIES_SCHEMA: optionalNonEmpty,
-  DATABENTO_OPTIONS_SCHEMA: optionalNonEmpty,
-  DATABENTO_OVERNIGHT_SCHEMA: optionalNonEmpty,
-  DATABENTO_DEFAULT_STYPE_IN: z.string().default("raw_symbol"),
-  DATABENTO_DEFAULT_STYPE_OUT: z.string().default("instrument_id"),
 });
 
 const parsed = envSchema.safeParse(process.env);

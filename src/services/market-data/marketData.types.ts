@@ -100,6 +100,9 @@ export interface MarketMover {
   session: MarketSession;
   reason?: string;
   timestamp: string;
+  // Per-item provenance (filled by the service so each row is self-describing).
+  source?: string;
+  displayMode?: MarketDataDisplayMode;
 }
 
 export interface OptionContract {
