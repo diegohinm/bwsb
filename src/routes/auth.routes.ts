@@ -131,7 +131,7 @@ authRouter.post(
 /**
  * POST /auth/email/login
  * Body: { email, password }
- * Sets the yt_session cookie and returns the user.
+ * Sets the yp_session cookie and returns the user.
  */
 authRouter.post(
   "/email/login",
@@ -185,7 +185,7 @@ authRouter.post(
 
 /**
  * GET /auth/me
- * Returns the current user (from the yt_session cookie) or null.
+ * Returns the current user (from the yp_session cookie) or null.
  */
 authRouter.get(
   "/me",

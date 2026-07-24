@@ -62,7 +62,7 @@ const envSchema = z.object({
     .string()
     .min(1, { message: "SUPABASE_SERVICE_ROLE_KEY is required" }),
 
-  // Session signing secret for the new email-auth session cookie (yt_session)
+  // Session signing secret for the new email-auth session cookie (yp_session)
   // and the legacy express-session cookie. Defaulted in non-production so the
   // backend always starts locally; set a strong value in production.
   APP_SESSION_SECRET: z
@@ -96,6 +96,24 @@ const envSchema = z.object({
 
   // Shared secret for the admin-only Reddit-verification review endpoints.
   ADMIN_SECRET: optionalNonEmpty,
+
+  // ── Social data provider (Reddit-like posts/comments/pulse) ────────────────
+  // The app never scrapes Reddit. Data comes from a swappable third-party
+  // provider queried server-side, or from local demo fixtures.
+  //   mock            → centralized local fixtures (default, always available)
+  //   mindcase        → third-party aggregator (needs MINDCASE_API_KEY)
+  //   brandwatch      → reserved for a future enterprise provider
+  //   reddit_official → reserved for the official API once credentials exist
+  //   off             → provider disabled; endpoints return an explicit empty
+  //                     state instead of data
+  SOCIAL_DATA_PROVIDER: z
+    .enum(["mock", "mindcase", "brandwatch", "reddit_official", "off"])
+    .default("mock"),
+  // Server-side only — never sent to the frontend.
+  MINDCASE_API_KEY: optionalNonEmpty,
+  MINDCASE_BASE_URL: optionalNonEmpty,
+  // How long a social payload is cached before the provider is queried again.
+  SOCIAL_CACHE_TTL_SECONDS: z.coerce.number().int().positive().default(60),
 });
 
 const parsed = envSchema.safeParse(process.env);

@@ -8,7 +8,7 @@ import {
 /**
  * optionalAuth
  *
- * Best-effort authentication. Reads the httpOnly `yt_session` cookie; if it maps
+ * Best-effort authentication. Reads the httpOnly `yp_session` cookie; if it maps
  * to a valid, unexpired session the corresponding user is attached to
  * `req.user`. If there is no cookie or it is invalid, the request simply
  * continues as anonymous — public endpoints must never fail here.

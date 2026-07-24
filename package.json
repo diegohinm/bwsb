@@ -1,7 +1,7 @@
 {
-  "name": "reddit-radar-bwsb",
+  "name": "yolopulse-bwsb",
   "version": "1.0.0",
-  "description": "Backend for YoloTerminal, internally known as bwsb.",
+  "description": "Backend for YOLOPulse, internally known as bwsb.",
   "private": true,
   "type": "module",
   "main": "dist/server.js",

@@ -79,7 +79,7 @@ CREATE TABLE IF NOT EXISTS public.app_users (
 );
 
 -- Opaque session tokens (sha256-hashed). The raw token lives only in the
--- httpOnly yt_session cookie and is never stored.
+-- httpOnly yp_session cookie and is never stored.
 CREATE TABLE IF NOT EXISTS public.user_sessions (
   id                 uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   user_id            uuid NOT NULL REFERENCES public.app_users(id) ON DELETE CASCADE,
@@ -795,9 +795,10 @@ CREATE TABLE IF NOT EXISTS public.api_usage_events (
 );
 
 -- ══ H. Personal / signed-in features ════════════════════════════════════════
--- Identity is the existing public.users table (id text, cuid) populated by the
--- Reddit OAuth callback; it already stores provider id, username and avatar, so
--- it doubles as the "user_profile". Personal tables key off users(id).
+-- Identity is public.app_users (email + password), which is what sessions are
+-- issued against. Personal tables therefore key off app_users(id) — a uuid.
+-- public.users remains only for the optional/future Reddit OAuth identity and
+-- must NOT be referenced here: an email user has no row in it.
 
 -- Personal alert rules already exist as public.user_alert_rules; add the columns
 -- this feature needs (idempotent).
@@ -807,7 +808,7 @@ ALTER TABLE public.user_alert_rules ADD COLUMN IF NOT EXISTS delivery_channels j
 
 CREATE TABLE IF NOT EXISTS public.user_notifications (
   id         uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  user_id    text NOT NULL REFERENCES public.users(id) ON DELETE CASCADE,
+  user_id    uuid NOT NULL REFERENCES public.app_users(id) ON DELETE CASCADE,
   title      text NOT NULL,
   body       text,
   metadata   jsonb NOT NULL DEFAULT '{}'::jsonb,
@@ -817,7 +818,7 @@ CREATE TABLE IF NOT EXISTS public.user_notifications (
 
 CREATE TABLE IF NOT EXISTS public.virtual_accounts (
   id            uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  user_id       text NOT NULL REFERENCES public.users(id) ON DELETE CASCADE,
+  user_id       uuid NOT NULL REFERENCES public.app_users(id) ON DELETE CASCADE,
   starting_cash numeric NOT NULL DEFAULT 100000,
   cash_balance  numeric NOT NULL DEFAULT 100000,
   equity_value  numeric NOT NULL DEFAULT 100000,
@@ -829,7 +830,7 @@ CREATE TABLE IF NOT EXISTS public.virtual_accounts (
 
 CREATE TABLE IF NOT EXISTS public.virtual_trades (
   id                 uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  user_id            text NOT NULL REFERENCES public.users(id) ON DELETE CASCADE,
+  user_id            uuid NOT NULL REFERENCES public.app_users(id) ON DELETE CASCADE,
   virtual_account_id uuid REFERENCES public.virtual_accounts(id) ON DELETE CASCADE,
   ticker             text REFERENCES public.tickers(ticker),
   side               text CHECK (side IN ('buy','sell','short','cover')),
@@ -847,7 +848,7 @@ CREATE TABLE IF NOT EXISTS public.virtual_trades (
 
 CREATE TABLE IF NOT EXISTS public.virtual_positions (
   id                 uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  user_id            text NOT NULL REFERENCES public.users(id) ON DELETE CASCADE,
+  user_id            uuid NOT NULL REFERENCES public.app_users(id) ON DELETE CASCADE,
   virtual_account_id uuid REFERENCES public.virtual_accounts(id) ON DELETE CASCADE,
   ticker             text REFERENCES public.tickers(ticker),
   instrument         text,
@@ -876,7 +877,7 @@ CREATE TABLE IF NOT EXISTS public.competitions (
 CREATE TABLE IF NOT EXISTS public.competition_participants (
   id                 uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   competition_id     uuid REFERENCES public.competitions(id) ON DELETE CASCADE,
-  user_id            text NOT NULL REFERENCES public.users(id) ON DELETE CASCADE,
+  user_id            uuid NOT NULL REFERENCES public.app_users(id) ON DELETE CASCADE,
   virtual_account_id uuid REFERENCES public.virtual_accounts(id) ON DELETE CASCADE,
   joined_at          timestamptz NOT NULL DEFAULT now(),
   CONSTRAINT competition_participants_uniq UNIQUE (competition_id, user_id)
@@ -885,12 +886,77 @@ CREATE TABLE IF NOT EXISTS public.competition_participants (
 CREATE TABLE IF NOT EXISTS public.competition_leaderboard_snapshots (
   id             uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   competition_id uuid REFERENCES public.competitions(id) ON DELETE CASCADE,
-  user_id        text NOT NULL REFERENCES public.users(id) ON DELETE CASCADE,
+  user_id        uuid NOT NULL REFERENCES public.app_users(id) ON DELETE CASCADE,
   rank           integer,
   equity_value   numeric,
   return_pct     numeric,
   snapshot_at    timestamptz NOT NULL DEFAULT now()
 );
+
+-- ── Migration: repoint personal tables from users(id) to app_users(id) ──────
+-- Earlier revisions keyed these tables off public.users (the Reddit-OAuth
+-- identity). Sessions are issued against public.app_users, so an email user hit
+-- a foreign-key violation on every personal write. Idempotent: each step is
+-- skipped once it has been applied.
+DO $$
+DECLARE
+  target_table text;
+  fk_name      text;
+BEGIN
+  FOREACH target_table IN ARRAY ARRAY[
+    'user_notifications',
+    'virtual_accounts',
+    'virtual_trades',
+    'virtual_positions',
+    'competition_participants',
+    'competition_leaderboard_snapshots'
+  ] LOOP
+    CONTINUE WHEN to_regclass('public.' || target_table) IS NULL;
+
+    -- 1. Drop any foreign key on this table that still points at public.users.
+    FOR fk_name IN
+      SELECT c.conname
+      FROM pg_constraint c
+      JOIN pg_class rel  ON rel.oid  = c.conrelid
+      JOIN pg_class frel ON frel.oid = c.confrelid
+      WHERE c.contype = 'f'
+        AND rel.relnamespace = 'public'::regnamespace
+        AND rel.relname = target_table
+        AND frel.relname = 'users'
+    LOOP
+      EXECUTE format('ALTER TABLE public.%I DROP CONSTRAINT %I', target_table, fk_name);
+    END LOOP;
+
+    -- 2. app_users.id is a uuid, so user_id must be one too.
+    IF EXISTS (
+      SELECT 1 FROM information_schema.columns
+      WHERE table_schema = 'public'
+        AND table_name = target_table
+        AND column_name = 'user_id'
+        AND data_type <> 'uuid'
+    ) THEN
+      EXECUTE format(
+        'ALTER TABLE public.%I ALTER COLUMN user_id TYPE uuid USING NULLIF(user_id::text, '''')::uuid',
+        target_table);
+    END IF;
+
+    -- 3. Attach the app_users foreign key exactly once.
+    IF NOT EXISTS (
+      SELECT 1
+      FROM pg_constraint c
+      JOIN pg_class rel  ON rel.oid  = c.conrelid
+      JOIN pg_class frel ON frel.oid = c.confrelid
+      WHERE c.contype = 'f'
+        AND rel.relnamespace = 'public'::regnamespace
+        AND rel.relname = target_table
+        AND frel.relname = 'app_users'
+    ) THEN
+      EXECUTE format(
+        'ALTER TABLE public.%I ADD CONSTRAINT %I FOREIGN KEY (user_id) REFERENCES public.app_users(id) ON DELETE CASCADE',
+        target_table, target_table || '_user_id_app_users_fkey');
+    END IF;
+  END LOOP;
+END $$;
 
 -- ══ Indexes ═════════════════════════════════════════════════════════════════
 -- Auth / email + reddit verification.

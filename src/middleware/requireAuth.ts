@@ -13,7 +13,7 @@ import {
  * On success `req.user` is guaranteed to be populated.
  *
  * Works whether or not optionalAuth ran earlier: if `req.user` is already set it
- * is reused, otherwise the yt_session cookie is validated here.
+ * is reused, otherwise the yp_session cookie is validated here.
  */
 export async function requireAuth(
   req: Request,

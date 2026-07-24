@@ -1,12 +1,12 @@
-# YoloTerminal
+# YOLOPulse
 
-YoloTerminal is an external web application for organizing public retail investing discussions into aggregated, read-only market intelligence dashboards.
+YOLOPulse is an external web application for organizing public retail investing discussions into aggregated, read-only market intelligence dashboards.
 
 The project is currently in development/testing.
 
 ## Purpose
 
-YoloTerminal helps users track public market discussion activity from investing-related online communities. The app focuses on aggregated analytics such as ticker mentions, public sentiment, structured bet activity, and retail attention trends.
+YOLOPulse helps users track public market discussion activity from investing-related online communities. The app focuses on aggregated analytics such as ticker mentions, public sentiment, structured bet activity, and retail attention trends.
 
 The app is informational only and does not provide investment advice.
 
@@ -25,7 +25,7 @@ The app is informational only and does not provide investment advice.
 
 ## Reddit Integration
 
-YoloTerminal is an external web app, not a Reddit-hosted Devvit app.
+YOLOPulse is an external web app, not a Reddit-hosted Devvit app.
 
 The app intends to use Reddit OAuth only for optional user sign-in.
 

@@ -5,6 +5,8 @@ import morgan from "morgan";
 import cookieParser from "cookie-parser";
 
 import { env, isProduction, isRedditOAuthConfigured } from "./config/env.js";
+import { BRANDING } from "./config/branding.js";
+import { getProviderStatus } from "./services/social/index.js";
 import { sessionMiddleware } from "./lib/sessionStore.js";
 import { optionalAuth } from "./middleware/optionalAuth.js";
 import { healthRouter } from "./routes/health.routes.js";
@@ -22,6 +24,7 @@ import { alertsRouter } from "./routes/alerts.routes.js";
 import { screenerRouter } from "./routes/screener.routes.js";
 import { researchRouter } from "./routes/research.routes.js";
 import { searchRouter } from "./routes/search.routes.js";
+import { pulseRouter } from "./routes/pulse.routes.js";
 import { productRouter } from "./routes/product.routes.js";
 import { personalRouter } from "./routes/personal.routes.js";
 import { notFound } from "./middleware/notFound.js";
@@ -49,7 +52,7 @@ app.use(
 // Body parsing.
 app.use(express.json());
 
-// Cookie parsing — required before optionalAuth reads the yt_session cookie.
+// Cookie parsing — required before optionalAuth reads the yp_session cookie.
 app.use(cookieParser());
 
 // Legacy express-session (PostgreSQL-backed) — retained only for the optional/
@@ -75,6 +78,8 @@ app.use("/api", alertsRouter);
 app.use("/api", screenerRouter);
 app.use("/api", researchRouter);
 app.use("/api", searchRouter);
+// Public cross-subreddit Pulse (social data provider, no auth).
+app.use("/api", pulseRouter);
 app.use("/api", productRouter);
 // Optional Reddit username verification (requireAuth applied inside the router).
 app.use("/api", redditVerificationRouter);
@@ -89,10 +94,18 @@ app.use(notFound);
 app.use(errorHandler);
 
 app.listen(env.PORT, () => {
-  console.log(`BWSB backend running on ${env.BACKEND_URL}`);
+  const social = getProviderStatus();
+  console.log(
+    `${BRANDING.productName} backend (${BRANDING.backendName}) running on ${env.BACKEND_URL}`,
+  );
   console.log(
     `Reddit OAuth: ${
       isRedditOAuthConfigured ? "configured" : "NOT configured (email auth only)"
+    }`,
+  );
+  console.log(
+    `Social data provider: ${social.active}${
+      social.fallbackReason ? ` — ${social.fallbackReason}` : ""
     }`,
   );
 });

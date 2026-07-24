@@ -5,7 +5,7 @@ import { createRandomToken, hashToken } from "./token.service.js";
  * Session lifecycle for email-auth users.
  *
  * A session is an opaque random token delivered to the browser in the httpOnly
- * `yt_session` cookie. Only the sha256 hash of the token is stored in
+ * `yp_session` cookie. Only the sha256 hash of the token is stored in
  * `user_sessions`; the raw token never touches the database or the logs.
  */
 
@@ -128,5 +128,5 @@ export async function clearSession(token: string): Promise<void> {
   ]);
 }
 
-export const SESSION_COOKIE_NAME = "yt_session";
+export const SESSION_COOKIE_NAME = "yp_session";
 export const SESSION_MAX_AGE_MS = THIRTY_DAYS_MS;
