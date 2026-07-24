@@ -6,7 +6,7 @@ import cookieParser from "cookie-parser";
 
 import { env, isProduction, isRedditOAuthConfigured } from "./config/env.js";
 import { BRANDING } from "./config/branding.js";
-import { getProviderStatus } from "./services/social/index.js";
+import { getSocialProviderStatus } from "./services/social/index.js";
 import { sessionMiddleware } from "./lib/sessionStore.js";
 import { optionalAuth } from "./middleware/optionalAuth.js";
 import { healthRouter } from "./routes/health.routes.js";
@@ -25,6 +25,7 @@ import { screenerRouter } from "./routes/screener.routes.js";
 import { researchRouter } from "./routes/research.routes.js";
 import { searchRouter } from "./routes/search.routes.js";
 import { pulseRouter } from "./routes/pulse.routes.js";
+import { marketDataRouter } from "./routes/marketData.routes.js";
 import { productRouter } from "./routes/product.routes.js";
 import { personalRouter } from "./routes/personal.routes.js";
 import { notFound } from "./middleware/notFound.js";
@@ -80,6 +81,8 @@ app.use("/api", researchRouter);
 app.use("/api", searchRouter);
 // Public cross-subreddit Pulse (social data provider, no auth).
 app.use("/api", pulseRouter);
+// Public market data (equities / extended-hours / options; license-gated, no auth).
+app.use("/api", marketDataRouter);
 app.use("/api", productRouter);
 // Optional Reddit username verification (requireAuth applied inside the router).
 app.use("/api", redditVerificationRouter);
@@ -94,7 +97,6 @@ app.use(notFound);
 app.use(errorHandler);
 
 app.listen(env.PORT, () => {
-  const social = getProviderStatus();
   console.log(
     `${BRANDING.productName} backend (${BRANDING.backendName}) running on ${env.BACKEND_URL}`,
   );
@@ -103,9 +105,11 @@ app.listen(env.PORT, () => {
       isRedditOAuthConfigured ? "configured" : "NOT configured (email auth only)"
     }`,
   );
-  console.log(
-    `Social data provider: ${social.active}${
-      social.fallbackReason ? ` — ${social.fallbackReason}` : ""
-    }`,
-  );
+  void getSocialProviderStatus().then((social) => {
+    console.log(
+      `Social data provider: ${social.provider} (${social.status})${
+        social.message ? ` — ${social.message}` : ""
+      }`,
+    );
+  });
 });

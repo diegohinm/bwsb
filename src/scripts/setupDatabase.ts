@@ -1011,6 +1011,79 @@ CREATE INDEX IF NOT EXISTS virtual_trades_account_idx ON public.virtual_trades (
 CREATE INDEX IF NOT EXISTS virtual_positions_account_idx ON public.virtual_positions (virtual_account_id);
 CREATE INDEX IF NOT EXISTS competition_participants_comp_idx ON public.competition_participants (competition_id);
 CREATE INDEX IF NOT EXISTS competition_leaderboard_comp_idx ON public.competition_leaderboard_snapshots (competition_id);
+
+-- ── Market data (optional persistence; the app uses an in-memory cache by
+--    default, these tables let a future job persist cache/snapshots) ─────────
+CREATE TABLE IF NOT EXISTS public.market_data_cache (
+  id          uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  cache_key   text UNIQUE NOT NULL,
+  provider    text NOT NULL,
+  payload     jsonb NOT NULL,
+  expires_at  timestamptz NOT NULL,
+  created_at  timestamptz DEFAULT now(),
+  updated_at  timestamptz DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS public.market_quotes_snapshots (
+  id             uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  symbol         text NOT NULL,
+  provider       text NOT NULL,
+  source         text NOT NULL,
+  display_mode   text NOT NULL,
+  session        text NOT NULL,
+  price          numeric,
+  bid            numeric,
+  ask            numeric,
+  open           numeric,
+  high           numeric,
+  low            numeric,
+  previous_close numeric,
+  change         numeric,
+  change_pct     numeric,
+  volume         numeric,
+  observed_at    timestamptz NOT NULL,
+  created_at     timestamptz DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS public.option_chain_snapshots (
+  id                 uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  underlying         text NOT NULL,
+  option_symbol      text NOT NULL,
+  provider           text NOT NULL,
+  source             text NOT NULL,
+  display_mode       text NOT NULL,
+  expiration         date,
+  strike             numeric,
+  type               text,
+  bid                numeric,
+  ask                numeric,
+  last               numeric,
+  mark               numeric,
+  volume             numeric,
+  open_interest      numeric,
+  implied_volatility numeric,
+  delta              numeric,
+  gamma              numeric,
+  theta              numeric,
+  vega               numeric,
+  observed_at        timestamptz NOT NULL,
+  created_at         timestamptz DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS public.market_provider_events (
+  id         uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  provider   text NOT NULL,
+  event_type text NOT NULL,
+  status     text NOT NULL,
+  message    text,
+  metadata   jsonb,
+  created_at timestamptz DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS market_data_cache_key_idx ON public.market_data_cache (cache_key);
+CREATE INDEX IF NOT EXISTS market_quotes_snapshots_symbol_idx ON public.market_quotes_snapshots (symbol, observed_at DESC);
+CREATE INDEX IF NOT EXISTS option_chain_snapshots_key_idx ON public.option_chain_snapshots (underlying, expiration, strike, type);
+CREATE INDEX IF NOT EXISTS market_provider_events_provider_idx ON public.market_provider_events (provider, created_at DESC);
 `;
 
 // ─────────────────────────────────────────────────────────────────────────────

@@ -15,7 +15,10 @@
     "db:setup": "tsx src/scripts/setupDatabase.ts",
     "db:seed": "tsx src/scripts/seedDatabase.ts",
     "db:drop": "tsx src/scripts/dropDatabase.ts",
-    "db:reset": "npm run db:drop && npm run db:setup && npm run db:seed"
+    "db:reset": "npm run db:drop && npm run db:setup && npm run db:seed",
+    "market:refresh": "tsx src/jobs/refreshMarketData.job.ts",
+    "portfolio:recalculate": "tsx src/jobs/recalculatePortfolioPnL.job.ts",
+    "movers:refresh": "tsx src/jobs/refreshMarketMovers.job.ts"
   },
   "dependencies": {
     "@prisma/client": "^6.19.3",
