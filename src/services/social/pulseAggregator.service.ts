@@ -10,6 +10,7 @@ import type {
   SubredditPulseMetric,
   SubredditPulseResponse,
   PulseTimeframe,
+  TopMentionedTicker,
 } from "./socialData.types.js";
 
 /**
@@ -26,7 +27,7 @@ import type {
 /** The aggregated analytics — provider/source/timestamps are added by the service. */
 export type PulseAggregate = Pick<
   SubredditPulseResponse,
-  "overall" | "subreddits" | "emergingTickers" | "divergence" | "heatmap"
+  "overall" | "subreddits" | "emergingTickers" | "divergence" | "heatmap" | "topMentioned"
 >;
 
 const VALUE_SUBS = new Set(["ValueInvesting", "SecurityAnalysis", "investing"]);
@@ -315,6 +316,34 @@ function buildDivergence(
   return rows.sort((a, b) => b.communities.length - a.communities.length).slice(0, 6);
 }
 
+/**
+ * Rank tickers by raw mention volume across every community, tagging each with
+ * its dominant crowd stance. This is the "top mentioned across Reddit" list the
+ * dashboard ticker strip consumes — deliberately volume-based (not acceleration,
+ * unlike `emergingTickers`) so it answers "what is retail talking about most
+ * right now". Symbols are already allowlist-filtered upstream by the ticker
+ * extractor, so no junk-symbol pass is needed here.
+ */
+function buildTopMentioned(items: SocialPostItem[], limit: number): TopMentionedTicker[] {
+  const byTicker = new Map<string, SocialPostItem[]>();
+  for (const it of items) {
+    // De-dupe tickers within a single item so one post counts once per symbol.
+    for (const t of new Set(it.tickers)) {
+      const arr = byTicker.get(t);
+      if (arr) arr.push(it);
+      else byTicker.set(t, [it]);
+    }
+  }
+  return [...byTicker.entries()]
+    .map(([symbol, its]) => ({
+      symbol,
+      mentionCount: its.length,
+      stance: dominantStance(its).stance,
+    }))
+    .sort((a, b) => b.mentionCount - a.mentionCount)
+    .slice(0, limit);
+}
+
 function buildHeatmap(
   bySub: Map<string, SocialPostItem[]>,
   emerging: EmergingTickerMetric[],
@@ -376,6 +405,7 @@ export function buildSubredditPulse(
   const emergingTickers = buildEmerging(items);
   const divergence = buildDivergence(bySub);
   const heatmap = buildHeatmap(bySub, emergingTickers);
+  const topMentioned = buildTopMentioned(items, 25);
 
   // Weight each community's stance tilt by its activity.
   const totalActivity = subreddits.reduce((s, r) => s + r.activityScore, 0) || 1;
@@ -395,5 +425,6 @@ export function buildSubredditPulse(
     emergingTickers,
     divergence,
     heatmap,
+    topMentioned,
   };
 }

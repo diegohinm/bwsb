@@ -25,6 +25,7 @@ import { screenerRouter } from "./routes/screener.routes.js";
 import { researchRouter } from "./routes/research.routes.js";
 import { searchRouter } from "./routes/search.routes.js";
 import { pulseRouter } from "./routes/pulse.routes.js";
+import { dashboardRouter } from "./routes/dashboard.routes.js";
 import { marketDataRouter } from "./routes/marketData.routes.js";
 import { productRouter } from "./routes/product.routes.js";
 import { personalRouter } from "./routes/personal.routes.js";
@@ -81,6 +82,7 @@ app.use("/api", researchRouter);
 app.use("/api", searchRouter);
 // Public cross-subreddit Pulse (social data provider, no auth).
 app.use("/api", pulseRouter);
+app.use("/api", dashboardRouter);
 // Public market data (equities / extended-hours / options; license-gated, no auth).
 app.use("/api", marketDataRouter);
 app.use("/api", productRouter);

@@ -120,6 +120,19 @@ export interface CommunityDivergenceMetric {
   }[];
 }
 
+/**
+ * A single ticker ranked by how much Reddit is talking about it, with the
+ * dominant crowd stance. Aggregated across every tracked community, so it is the
+ * canonical "top mentioned across Reddit investing communities" list that feeds
+ * the dashboard ticker strip. Provider-agnostic — computed from the same
+ * normalized items every provider produces.
+ */
+export interface TopMentionedTicker {
+  symbol: string;
+  mentionCount: number;
+  stance: SocialStance;
+}
+
 export interface PulseHeatmap {
   tickers: string[];
   subreddits: string[];
@@ -144,6 +157,8 @@ export interface SubredditPulseResponse {
   emergingTickers: EmergingTickerMetric[];
   divergence: CommunityDivergenceMetric[];
   heatmap: PulseHeatmap;
+  /** Top tickers by raw mention volume across all communities (desc). */
+  topMentioned: TopMentionedTicker[];
 }
 
 export interface TickerSocialFeedResponse {
