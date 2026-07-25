@@ -29,6 +29,15 @@ import type {
  *      serve demo data instantly (no per-request wait) during the outage;
  *   3. keeps trying the provider in the BACKGROUND (single-flight per key) so
  *      real data is warmed into the cache the moment the provider recovers.
+ *
+ * Rate-limit protection (Mindcase 429s):
+ *   4. SINGLE-FLIGHT per cache key for interactive reads too — two concurrent
+ *      requests for the same pulse (React StrictMode double-render, Pulse page
+ *      + dashboard strip) share ONE upstream call, never two Mindcase jobs;
+ *   5. STALE-WHILE-ERROR — when the provider fails or is rate-limited and a
+ *      previous REAL payload is still inside its stale window, that payload is
+ *      served (isMock stays false, source stays the provider) with an explicit
+ *      warning. Demo data is only used when there is nothing cached at all.
  */
 
 const TTL = env.SOCIAL_CACHE_TTL_SECONDS;
@@ -48,10 +57,13 @@ const FALLBACK_TTL_SECONDS = Math.min(20, TTL);
 const PROVIDER_INTERACTIVE_DEADLINE_MS = 1_500;
 
 /**
- * A BACKGROUND revalidation may wait longer — nobody is blocked on it, and a
- * slow-but-alive provider still warms real data into the cache for next time.
+ * A BACKGROUND revalidation may wait much longer — nobody is blocked on it, and
+ * a slow-but-alive provider still warms real data into the cache for next time.
+ * Generous on purpose: a rate-limit-safe Mindcase sweep (2 subreddits at a time,
+ * 3s between job polls) legitimately takes minutes, and abandoning it early
+ * would both waste the upstream calls already spent and keep the breaker open.
  */
-const PROVIDER_BACKGROUND_DEADLINE_MS = 12_000;
+const PROVIDER_BACKGROUND_DEADLINE_MS = 180_000;
 
 /** Consecutive failures before the breaker opens. */
 const BREAKER_FAILURE_THRESHOLD = 2;
@@ -101,10 +113,8 @@ function recordProviderFailure(): void {
 function recordProviderOk(): void {
   breaker.failures = 0;
   breaker.openUntil = 0;
+  lastFallbackReason = null;
 }
-
-// ── Background single-flight revalidation ────────────────────────────────────
-const inFlight = new Set<string>();
 
 /** Minimal shape every social payload shares. */
 interface SocialPayload {
@@ -112,21 +122,53 @@ interface SocialPayload {
   warning?: string;
 }
 
+// ── Single-flight: one upstream call per cache key ───────────────────────────
+/**
+ * In-flight upstream calls keyed by cache key. Any number of concurrent readers
+ * — two browser tabs, React's double-invoked effects, the Pulse page and the
+ * dashboard ticker strip asking for the same timeframe — attach to the SAME
+ * promise, so the provider is called once. The entry is removed when it settles,
+ * so a later request still gets fresh data.
+ */
+const inFlightRequests = new Map<string, Promise<SocialPayload>>();
+
+/** Join the in-flight call for `key`, or start one. */
+function singleFlight<T extends SocialPayload>(
+  key: string,
+  work: () => Promise<T>,
+): Promise<T> {
+  const existing = inFlightRequests.get(key);
+  if (existing) return existing as Promise<T>;
+
+  const promise = work().finally(() => {
+    inFlightRequests.delete(key);
+  });
+  inFlightRequests.set(key, promise as Promise<SocialPayload>);
+  // A shared promise may outlive the consumer that started it (deadline hit,
+  // client gone). Keep a no-op handler so a late rejection is never "unhandled".
+  promise.catch(() => {});
+  return promise;
+}
+
+// ── Background revalidation ─────────────────────────────────────────────────
+/** Cache keys that already have a background watcher attached. */
+const backgroundWatch = new Set<string>();
+
 /**
  * Warm real data into the cache in the background without blocking anyone. Only
- * one revalidation runs per cache key at a time; a duplicate `work` promise is
- * swallowed so it never becomes an unhandled rejection.
+ * one watcher runs per cache key; a duplicate `work` promise is swallowed so it
+ * never becomes an unhandled rejection.
  */
 function revalidateInBackground<T extends SocialPayload>(
   key: string,
   providerName: string,
   work: Promise<T>,
 ): void {
-  if (inFlight.has(key)) {
+  if (backgroundWatch.has(key)) {
     work.catch(() => {});
     return;
   }
-  inFlight.add(key);
+  backgroundWatch.add(key);
   void withDeadline(providerName, work, PROVIDER_BACKGROUND_DEADLINE_MS)
     .then((fresh) => {
       if (!fresh.isMock) {
@@ -138,9 +180,15 @@ function revalidateInBackground<T extends SocialPayload>(
     .catch((err) => {
       recordProviderFailure();
       recordError(err);
+      // The interactive path usually gives up on its short deadline before the
+      // upstream answers, so THIS is where a 429 is actually observed. Remember
+      // it so the warning users see names the real cause.
+      if (!(err instanceof ProviderTimeoutError)) {
+        lastFallbackReason = isRateLimitFailure(err) ? "rate_limit" : "failure";
+      }
     })
     .finally(() => {
-      inFlight.delete(key);
+      backgroundWatch.delete(key);
     });
 }
 
@@ -218,6 +266,14 @@ export async function getIngestionStatus() {
       ...status,
       configuredProvider: env.SOCIAL_DATA_PROVIDER,
       cacheTtlSeconds: TTL,
+      // Rate-limit guards actually in force. Values only — no secrets.
+      limits: {
+        maxConcurrency: env.MINDCASE_MAX_CONCURRENCY,
+        pollIntervalMs: env.MINDCASE_POLL_INTERVAL_MS,
+        maxPolls: env.MINDCASE_MAX_POLLS,
+        maxRetries: env.MINDCASE_MAX_RETRIES,
+      },
+      inFlightRequests: inFlightRequests.size,
       lastSuccessAt: diagnostics.lastSuccessAt,
       lastErrorAt: diagnostics.lastErrorAt,
       lastError: diagnostics.lastError,
@@ -231,27 +287,122 @@ export async function getIngestionStatus() {
 const DISABLED_WARNING =
   "Social data provider is disabled (SOCIAL_DATA_PROVIDER=off). Showing demo data.";
 
-function misconfiguredWarning(provider: string): string {
-  return `${provider} provider is not configured. Showing demo data.`;
+/** Human-facing provider name used in warnings shown in the UI. */
+function providerLabel(provider: string): string {
+  switch (provider) {
+    case "mindcase":
+      return "Mindcase";
+    case "brandwatch":
+      return "Brandwatch";
+    case "reddit_official":
+      return "Reddit Official API";
+    default:
+      return provider;
+  }
 }
 
-function failureWarning(provider: string): string {
-  return `${provider} provider is unavailable. Showing demo data.`;
+/** Why a fallback path was taken. Drives the warning text shown in the UI. */
+type FallbackReason =
+  | "rate_limit"
+  | "timeout"
+  | "misconfigured"
+  | "failure"
+  | "breaker";
+
+/**
+ * Why the provider last failed. Once the breaker opens, requests no longer touch
+ * the provider and would otherwise lose the reason — but the user still needs to
+ * know WHY they are looking at cached data. Reset on the next success.
+ */
+let lastFallbackReason: FallbackReason | null = null;
+
+/** Warning for last-known-good REAL data served from the stale cache. */
+function staleWarning(provider: string, reason: FallbackReason): string {
+  const label = providerLabel(provider);
+  switch (reason) {
+    case "rate_limit":
+      return `${label} rate limit reached. Showing cached data.`;
+    case "timeout":
+      return `${label} is taking too long. Showing cached data — retrying live data in the background.`;
+    case "breaker":
+      return `${label} is temporarily unavailable. Showing cached data — retrying live data in the background.`;
+    case "misconfigured":
+      return `${label} is not configured. Showing cached data.`;
+    case "failure":
+    default:
+      return `${label} is unavailable. Showing cached data.`;
+  }
 }
 
-function timeoutWarning(provider: string): string {
-  return `${provider} provider is taking too long. Showing demo data — retrying live data in the background.`;
+/** Warning for demo data served because nothing real was cached. */
+function mockWarning(provider: string, reason: FallbackReason): string {
+  const label = providerLabel(provider);
+  switch (reason) {
+    case "rate_limit":
+      return `${label} unavailable. Showing demo data.`;
+    case "timeout":
+      return `${label} is taking too long. Showing demo data — retrying live data in the background.`;
+    case "breaker":
+      return `${label} is temporarily unavailable. Showing demo data — retrying live data in the background.`;
+    case "misconfigured":
+      return `${label} provider is not configured. Showing demo data.`;
+    case "failure":
+    default:
+      return `${label} unavailable. Showing demo data.`;
+  }
 }
 
-function breakerWarning(provider: string): string {
-  return `${provider} provider is temporarily unavailable. Showing demo data — retrying live data in the background.`;
+/** True when a failure means the upstream told us to slow down (HTTP 429). */
+function isRateLimitFailure(err: unknown): boolean {
+  if (!(err instanceof Error)) return false;
+  if (err.name === "MindcaseRateLimitError") return true;
+  if ((err as { status?: number }).status === 429) return true;
+  return /rate limit|429/i.test(err.message);
 }
 
 /**
- * Shared resolution path for every social read: cache → (disabled? mock) →
- * (breaker open? instant demo + background retry) → interactive attempt with a
- * short deadline → labeled demo fallback. Real payloads cache for the full TTL,
- * demo payloads cache briefly so recovery is picked up quickly.
+ * Demo payloads live under their own key so they can never evict the last real
+ * payload — stale real data must stay available to fall back on.
+ */
+function fallbackKey(key: string): string {
+  return `${key}::fallback`;
+}
+
+/**
+ * Serve the best honest answer when the provider could not be reached:
+ *   1. last-known-good REAL data from the stale cache (isMock stays false,
+ *      source stays the provider) + a warning saying it is cached;
+ *   2. otherwise labeled demo data (isMock true) + a warning saying so.
+ */
+async function staleOrMock<T extends SocialPayload>(
+  key: string,
+  provider: string,
+  fetchMock: () => Promise<T>,
+  reason: FallbackReason,
+): Promise<T> {
+  const stale = memoryCache.getStale<T>(key);
+  if (stale && !stale.value.isMock) {
+    recordSuccess(false);
+    // Copy: never mutate the cached object with a request-specific warning.
+    return { ...stale.value, warning: staleWarning(provider, reason) };
+  }
+
+  const cachedMock = memoryCache.get<T>(fallbackKey(key));
+  if (cachedMock) return { ...cachedMock, warning: mockWarning(provider, reason) };
+
+  const result = await fetchMock();
+  result.warning = mockWarning(provider, reason);
+  recordSuccess(true);
+  memoryCache.set(fallbackKey(key), result, FALLBACK_TTL_SECONDS);
+  return result;
+}
+
+/**
+ * Shared resolution path for every social read: fresh cache → (disabled? mock) →
+ * (breaker open? stale/demo + background retry) → single-flight interactive
+ * attempt with a short deadline → stale cache → labeled demo. Real payloads
+ * cache for the full TTL (plus a stale window), demo payloads cache briefly
+ * under a separate key so recovery is picked up quickly.
  */
 async function resolveSocial<T extends SocialPayload>(
   key: string,
@@ -261,34 +412,51 @@ async function resolveSocial<T extends SocialPayload>(
   const cached = memoryCache.get<T>(key);
   if (cached) return cached;
 
+  // A recent demo payload short-circuits the provider during an outage — but
+  // only while there is no stale REAL payload worth preferring over it.
+  const cachedFallback = memoryCache.get<T>(fallbackKey(key));
+  if (cachedFallback && !memoryCache.getStale<T>(key)) {
+    // Re-label if we have since learned the actual cause (e.g. a rate limit
+    // reported by a background attempt after this payload was cached).
+    if (!isDisabled() && lastFallbackReason) {
+      return {
+        ...cachedFallback,
+        warning: mockWarning(env.SOCIAL_DATA_PROVIDER, lastFallbackReason),
+      };
+    }
+    return cachedFallback;
+  }
+
   // Disabled provider → always demo.
   if (isDisabled()) {
     const result = await fetchMock();
     result.warning = DISABLED_WARNING;
     recordSuccess(true);
-    memoryCache.set(key, result, FALLBACK_TTL_SECONDS);
+    memoryCache.set(fallbackKey(key), result, FALLBACK_TTL_SECONDS);
     return result;
   }
 
   const provider = getSocialDataProvider();
 
-  // Breaker open → serve demo immediately, warm real data in the background.
+  // Breaker open → answer immediately from stale/demo, warm real data in the
+  // background. The background call is single-flighted too, so an open breaker
+  // can never stack up upstream jobs.
   if (breakerOpen()) {
-    revalidateInBackground(key, provider.name, fetchReal());
-    const result = await fetchMock();
-    result.warning = breakerWarning(provider.name);
-    recordSuccess(true);
-    memoryCache.set(key, result, FALLBACK_TTL_SECONDS);
-    return result;
+    revalidateInBackground(key, provider.name, singleFlight(key, fetchReal));
+    // Keep naming the ACTUAL cause (e.g. a rate limit) while the breaker rides
+    // out the outage — "temporarily unavailable" only when we never knew why.
+    return staleOrMock(key, provider.name, fetchMock, lastFallbackReason ?? "breaker");
   }
 
-  // Interactive attempt bounded by the short deadline.
-  const work = fetchReal();
+  // Interactive attempt: shared with any identical concurrent request, bounded
+  // by the short deadline.
+  const work = singleFlight(key, fetchReal);
   try {
     const result = await withDeadline(provider.name, work, PROVIDER_INTERACTIVE_DEADLINE_MS);
     recordProviderOk();
     recordSuccess(result.isMock);
-    memoryCache.set(key, result, result.isMock ? FALLBACK_TTL_SECONDS : TTL);
+    if (result.isMock) memoryCache.set(fallbackKey(key), result, FALLBACK_TTL_SECONDS);
+    else memoryCache.set(key, result, TTL);
     return result;
   } catch (err) {
     const msg = recordError(err);
@@ -299,21 +467,30 @@ async function resolveSocial<T extends SocialPayload>(
     // A slow-but-alive provider keeps running; reuse that same work promise to
     // warm real data in the background rather than issuing a second upstream call.
     if (timedOut) revalidateInBackground(key, provider.name, work);
-    else work.catch(() => {});
 
-    const result = await fetchMock();
-    result.warning = timedOut
-      ? timeoutWarning(provider.name)
+    const reason: FallbackReason = timedOut
+      ? "timeout"
       : misconfigured
-        ? misconfiguredWarning(provider.name)
-        : failureWarning(provider.name);
-    recordSuccess(true);
-    memoryCache.set(key, result, FALLBACK_TTL_SECONDS);
-    return result;
+        ? "misconfigured"
+        : isRateLimitFailure(err)
+          ? "rate_limit"
+          : "failure";
+    // A timeout says nothing about the cause, so it must not erase a known one.
+    if (!timedOut) lastFallbackReason = reason;
+
+    return staleOrMock(key, provider.name, fetchMock, reason);
   }
 }
 
-/** Cross-subreddit pulse. Always resolves (mock fallback on any failure). */
+/**
+ * Cross-subreddit pulse. Always resolves (stale cache, then mock fallback).
+ *
+ * Cache key: `pulse:<provider>:<timeframe>:<q>` — e.g. `pulse:mindcase:24h:`.
+ * The provider segment keeps demo and live payloads from sharing an entry when
+ * SOCIAL_DATA_PROVIDER changes. Every caller of this function (the /pulse route
+ * AND the dashboard ticker strip) shares this key, so they also share the cache
+ * and the single-flight upstream call.
+ */
 export async function getSubredditPulse(params: {
   timeframe: PulseTimeframe;
   q?: string;

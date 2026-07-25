@@ -39,6 +39,22 @@ const optionalNonEmpty = z
   .optional()
   .transform((v) => (v && v.length > 0 ? v : undefined));
 
+/**
+ * Integer env var with a safe fallback. A missing, blank or unparseable value
+ * yields `fallback` instead of failing startup, and the result is clamped to
+ * `min`/`max` — an operator typo can never turn into an unbounded request rate.
+ */
+const intEnv = (fallback: number, min: number, max: number) =>
+  z
+    .string()
+    .optional()
+    .transform((v) => {
+      if (v === undefined || v.trim() === "") return fallback;
+      const n = Number(v.trim());
+      if (!Number.isFinite(n)) return fallback;
+      return Math.min(max, Math.max(min, Math.trunc(n)));
+    });
+
 const envSchema = z.object({
   PORT: z.coerce.number().int().positive().default(4000),
   NODE_ENV: z
@@ -121,6 +137,19 @@ const envSchema = z.object({
   // Server-side only — never sent to the frontend.
   MINDCASE_API_KEY: optionalNonEmpty,
   MINDCASE_BASE_URL: optionalNonEmpty,
+
+  // ── Mindcase rate-limit guards (all optional, safe defaults) ───────────────
+  // Mindcase is metered and answers 429 when pushed. These four knobs bound how
+  // hard the provider may hit it. Lower MINDCASE_MAX_CONCURRENCY to 1 if 429s
+  // persist. See services/social/providers/mindcaseSocialData.provider.ts.
+  /** How many subreddits may be fetched at the same time. */
+  MINDCASE_MAX_CONCURRENCY: intEnv(2, 1, 16),
+  /** Minimum delay between two `/jobs/{id}/results` polls. */
+  MINDCASE_POLL_INTERVAL_MS: intEnv(3_000, 250, 60_000),
+  /** Max number of result polls before a job is given up on. */
+  MINDCASE_MAX_POLLS: intEnv(10, 1, 100),
+  /** Retries after a 429 / 5xx before failing with a controlled error. */
+  MINDCASE_MAX_RETRIES: intEnv(3, 0, 10),
   // How long a social payload is cached before the provider is queried again.
   // SOCIAL_DATA_CACHE_TTL_SECONDS is the canonical name; SOCIAL_CACHE_TTL_SECONDS
   // is accepted as a legacy alias. Resolved into env.SOCIAL_CACHE_TTL_SECONDS below.
