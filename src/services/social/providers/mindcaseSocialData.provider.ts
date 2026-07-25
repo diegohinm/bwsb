@@ -166,6 +166,7 @@ export class MindcaseSocialDataProvider implements SocialDataProvider {
           }
         } catch (err) {
           // One subreddit failing shouldn't sink the whole request — log and go on.
+          console.log('AAAA',err);
           console.error(`Mindcase: subreddit "${sub}" fetch failed:`, sanitizeErr(err));
         }
       }
