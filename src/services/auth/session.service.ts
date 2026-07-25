@@ -1,5 +1,6 @@
 import { query, queryOne } from "../../lib/db.js";
 import { createRandomToken, hashToken } from "./token.service.js";
+import { DEFAULT_AVATAR_URL } from "../../config/branding.js";
 
 /**
  * Session lifecycle for email-auth users.
@@ -17,6 +18,8 @@ export interface AuthUser {
   email: string;
   displayName: string | null;
   emailVerified: boolean;
+  /** Resolved avatar URL — the user's own, or the global default frog. */
+  avatarUrl: string;
   reddit: {
     username: string;
     verificationStatus: string;
@@ -28,6 +31,7 @@ interface AppUserRow {
   email: string;
   display_name: string | null;
   email_verified_at: Date | null;
+  avatar_url: string | null;
 }
 
 interface RedditAccountRow {
@@ -42,7 +46,7 @@ interface RedditAccountRow {
  */
 export async function getAuthUserById(userId: string): Promise<AuthUser | null> {
   const user = await queryOne<AppUserRow>(
-    `SELECT id, email, display_name, email_verified_at
+    `SELECT id, email, display_name, email_verified_at, avatar_url
        FROM public.app_users
       WHERE id = $1`,
     [userId],
@@ -63,6 +67,12 @@ export async function getAuthUserById(userId: string): Promise<AuthUser | null> 
     email: user.email,
     displayName: user.display_name,
     emailVerified: user.email_verified_at != null,
+    // Whitespace-only avatar_url counts as "no avatar" — same rule as the
+    // frontend helper (fwsb/src/lib/avatar.ts) so both sides agree.
+    avatarUrl:
+      user.avatar_url && user.avatar_url.trim().length > 0
+        ? user.avatar_url
+        : DEFAULT_AVATAR_URL,
     reddit: reddit
       ? {
           username: reddit.reddit_username,

@@ -10,5 +10,9 @@ declare module "express-session" {
     userId?: string;
     /** One-time CSRF token for the in-flight Reddit OAuth handshake. */
     oauthState?: string;
+    /** One-time CSRF token for the in-flight Google OAuth handshake. */
+    googleOAuthState?: string;
+    /** Post-login redirect target for the in-flight Google OAuth handshake. */
+    googleReturnTo?: string;
   }
 }

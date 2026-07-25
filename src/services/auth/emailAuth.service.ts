@@ -7,6 +7,7 @@ import {
 import { hashPassword, verifyPassword, validatePasswordStrength } from "./password.service.js";
 import { createRandomToken, hashToken } from "./token.service.js";
 import { createSession } from "./session.service.js";
+import { DEFAULT_AVATAR_URL, DEFAULT_AVATAR_TYPE } from "../../config/branding.js";
 
 /**
  * Email + password authentication — the PRIMARY auth system.
@@ -42,11 +43,13 @@ export async function requestEmailSignup(email: string): Promise<void> {
   const normalized = normalizeEmail(raw);
 
   // Create the user if they don't exist yet (idempotent on email_normalized).
+  // New accounts get the global default frog avatar and the email auth_provider.
   await query(
-    `INSERT INTO public.app_users (email, email_normalized)
-     VALUES ($1, $2)
+    `INSERT INTO public.app_users
+       (email, email_normalized, avatar_url, avatar_type, auth_provider)
+     VALUES ($1, $2, $3, $4, 'email')
      ON CONFLICT (email_normalized) DO NOTHING`,
-    [raw, normalized],
+    [raw, normalized, DEFAULT_AVATAR_URL, DEFAULT_AVATAR_TYPE],
   );
 
   const user = await queryOne<{ id: string }>(

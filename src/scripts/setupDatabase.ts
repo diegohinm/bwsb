@@ -73,10 +73,39 @@ CREATE TABLE IF NOT EXISTS public.app_users (
   password_hash     text,
   display_name      text,
   avatar_url        text,
+  avatar_type       text,
+  avatar_seed       text,
+  google_sub        text UNIQUE,
+  auth_provider     text,
   created_at        timestamptz NOT NULL DEFAULT now(),
   updated_at        timestamptz NOT NULL DEFAULT now(),
   last_login_at     timestamptz
 );
+
+-- Backfill columns on databases created before Google auth / default avatars.
+-- Idempotent: ADD COLUMN IF NOT EXISTS is a no-op once applied.
+ALTER TABLE public.app_users ADD COLUMN IF NOT EXISTS avatar_type   text;
+ALTER TABLE public.app_users ADD COLUMN IF NOT EXISTS avatar_seed   text;
+ALTER TABLE public.app_users ADD COLUMN IF NOT EXISTS google_sub    text;
+ALTER TABLE public.app_users ADD COLUMN IF NOT EXISTS auth_provider text;
+
+-- Unique index on google_sub (a user has at most one linked Google account).
+-- A partial unique index ignores the many NULLs (email/password-only users).
+CREATE UNIQUE INDEX IF NOT EXISTS app_users_google_sub_uniq
+  ON public.app_users (google_sub)
+  WHERE google_sub IS NOT NULL;
+
+-- Every existing user without an avatar gets the global default frog
+-- (/avatars/default-frog.svg, served by the frontend from public/avatars).
+-- "Without an avatar" = NULL, empty or whitespace-only, plus rows still pointing
+-- at a retired default path (those 404 and are not personalized). Users with a
+-- real custom avatar_url are left untouched.
+UPDATE public.app_users
+   SET avatar_url  = '/avatars/default-frog.svg',
+       avatar_type = 'default_frog'
+ WHERE avatar_url IS NULL
+    OR trim(avatar_url) = ''
+    OR trim(avatar_url) = '/avatars/default-frog.png';
 
 -- Opaque session tokens (sha256-hashed). The raw token lives only in the
 -- httpOnly yt_session cookie and is never stored.

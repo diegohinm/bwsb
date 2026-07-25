@@ -21,6 +21,8 @@ import { z } from "zod";
 /** Placeholder values that must be treated as "not configured". */
 const REDDIT_ID_PLACEHOLDER = "your_reddit_client_id";
 const REDDIT_SECRET_PLACEHOLDER = "your_reddit_client_secret";
+const GOOGLE_ID_PLACEHOLDER = "your_google_client_id";
+const GOOGLE_SECRET_PLACEHOLDER = "your_google_client_secret";
 
 const boolFromString = (fallback: boolean) =>
   z
@@ -93,6 +95,13 @@ const envSchema = z.object({
 
   // Reddit username users send their verification code to (inbound only).
   REDDIT_VERIFICATION_USERNAME: z.string().default("yolo-terminal"),
+
+  // ── Google OAuth 2.0 (OPTIONAL) ─────────────────────────────────────────────
+  // All optional so the backend always starts. The client secret is server-side
+  // only and never sent to the frontend. See isGoogleOAuthConfigured below.
+  GOOGLE_CLIENT_ID: optionalNonEmpty,
+  GOOGLE_CLIENT_SECRET: optionalNonEmpty,
+  GOOGLE_REDIRECT_URI: optionalNonEmpty,
 
   // Shared secret for the admin-only Reddit-verification review endpoints.
   ADMIN_SECRET: optionalNonEmpty,
@@ -175,10 +184,27 @@ export const isRedditOAuthConfigured: boolean = Boolean(
     data.REDDIT_USER_AGENT,
 );
 
+/**
+ * Google OAuth is only "configured" when a real client id + secret are both
+ * present AND are not the shipped placeholders. The redirect URI defaults to
+ * <BACKEND_URL>/auth/google/callback when not explicitly set. When false the
+ * OAuth routes are disabled (503) but the app still runs.
+ */
+export const isGoogleOAuthConfigured: boolean = Boolean(
+  data.GOOGLE_CLIENT_ID &&
+    data.GOOGLE_CLIENT_ID !== GOOGLE_ID_PLACEHOLDER &&
+    data.GOOGLE_CLIENT_SECRET &&
+    data.GOOGLE_CLIENT_SECRET !== GOOGLE_SECRET_PLACEHOLDER,
+);
+
 export const env = {
   ...data,
   // Backwards-compatible alias: existing code reads env.FRONTEND_URL.
   FRONTEND_URL: data.FRONTEND_ORIGIN,
+  // Effective Google redirect URI: explicit value wins, else derive from the
+  // backend URL so a minimal id+secret config still works out of the box.
+  GOOGLE_REDIRECT_URI:
+    data.GOOGLE_REDIRECT_URI ?? `${data.BACKEND_URL}/auth/google/callback`,
   // Canonical cache TTL: prefer the new name, fall back to the legacy alias,
   // default 600s. Code reads env.SOCIAL_CACHE_TTL_SECONDS.
   SOCIAL_CACHE_TTL_SECONDS:

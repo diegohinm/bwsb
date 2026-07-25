@@ -1,6 +1,11 @@
 import { Router, type Request, type Response } from "express";
 
-import { env, isProduction, isRedditOAuthConfigured } from "../config/env.js";
+import {
+  env,
+  isProduction,
+  isRedditOAuthConfigured,
+  isGoogleOAuthConfigured,
+} from "../config/env.js";
 import { ok, fail, asyncHandler } from "../lib/response.js";
 import { rateLimit } from "../middleware/rateLimit.js";
 import {
@@ -30,8 +35,28 @@ import {
   generateState,
 } from "../services/reddit.js";
 import { upsertUserFromReddit } from "../services/user.js";
+import {
+  buildAuthorizeUrl as buildGoogleAuthorizeUrl,
+  exchangeCodeForToken as exchangeGoogleCode,
+  fetchGoogleIdentity,
+  generateState as generateGoogleState,
+} from "../services/auth/google.js";
+import { findOrCreateUserFromGoogle } from "../services/auth/googleAuth.service.js";
 
 export const authRouter = Router();
+
+/**
+ * Only allow post-login redirects to internal, single-slash-rooted paths so a
+ * crafted `returnTo` can never bounce the user to an external origin.
+ */
+function safeReturnTo(value: unknown, fallback = "/dashboard"): string {
+  if (typeof value !== "string") return fallback;
+  // Must start with a single "/" (reject "//evil.com" and "/\evil.com").
+  if (!value.startsWith("/") || value.startsWith("//") || value.startsWith("/\\")) {
+    return fallback;
+  }
+  return value;
+}
 
 // ── Cookie helpers ────────────────────────────────────────────────────────────
 function setSessionCookie(res: Response, token: string): void {
@@ -365,6 +390,110 @@ authRouter.get("/reddit/callback", async (req: Request, res: Response) => {
     });
   } catch (err) {
     console.error("Reddit OAuth callback failed:", err);
+    return failRedirect("oauth_failed");
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Google OAuth (OPTIONAL — disabled until configured)
+// ═══════════════════════════════════════════════════════════════════════════
+
+/**
+ * GET /auth/google/config-check
+ * Reports whether Google OAuth is configured. Never exposes the client secret.
+ */
+authRouter.get("/google/config-check", (_req: Request, res: Response) => {
+  return ok(res, {
+    isConfigured: isGoogleOAuthConfigured,
+    // Safe to surface: the redirect URI is public (registered with Google) and
+    // is not a secret. The client id/secret are never returned.
+    redirectUri: isGoogleOAuthConfigured ? env.GOOGLE_REDIRECT_URI : null,
+  });
+});
+
+/**
+ * GET /auth/google
+ * Starts the OAuth handshake. Returns 503 when Google OAuth is not configured.
+ * Preserves an internal `returnTo` for after login.
+ */
+authRouter.get("/google", (req: Request, res: Response) => {
+  if (!isGoogleOAuthConfigured) {
+    res.status(503).json({ error: "Google OAuth is not configured yet" });
+    return;
+  }
+
+  const state = generateGoogleState();
+  req.session.googleOAuthState = state;
+  req.session.googleReturnTo = safeReturnTo(req.query.returnTo);
+
+  req.session.save((err) => {
+    if (err) {
+      console.error("Failed to save session before Google redirect:", err);
+      res.redirect(`${env.FRONTEND_ORIGIN}/login?error=session`);
+      return;
+    }
+    res.redirect(buildGoogleAuthorizeUrl(state));
+  });
+});
+
+/**
+ * GET /auth/google/callback
+ * Google redirects here. Verifies state, exchanges the code, finds/creates the
+ * app_user by email, issues a normal yt_session, and redirects to the frontend.
+ * Also 503 when unconfigured.
+ */
+authRouter.get("/google/callback", async (req: Request, res: Response) => {
+  if (!isGoogleOAuthConfigured) {
+    res.status(503).json({ error: "Google OAuth is not configured yet" });
+    return;
+  }
+
+  const { code, state, error } = req.query;
+  const expectedState = req.session.googleOAuthState;
+  const returnTo = safeReturnTo(req.session.googleReturnTo);
+  delete req.session.googleOAuthState;
+  delete req.session.googleReturnTo;
+
+  const failRedirect = (reason: string) =>
+    res.redirect(`${env.FRONTEND_ORIGIN}/login?error=${reason}`);
+
+  if (typeof error === "string" && error) {
+    return failRedirect("access_denied");
+  }
+  if (typeof state !== "string" || !expectedState || state !== expectedState) {
+    return failRedirect("invalid_state");
+  }
+  if (typeof code !== "string" || !code) {
+    return failRedirect("missing_code");
+  }
+
+  try {
+    const accessToken = await exchangeGoogleCode(code);
+    const identity = await fetchGoogleIdentity(accessToken);
+    const { userId } = await findOrCreateUserFromGoogle(identity);
+
+    // Issue the SAME session type as email login (yt_session httpOnly cookie).
+    const sessionToken = await createSession(userId);
+    setSessionCookie(res, sessionToken);
+
+    await logAuthEvent({
+      userId,
+      eventType: "google_login",
+      success: true,
+      ipAddress: ipOf(req),
+      userAgent: uaOf(req),
+    });
+
+    return res.redirect(`${env.FRONTEND_ORIGIN}${returnTo}`);
+  } catch (err) {
+    console.error("Google OAuth callback failed:", err);
+    await logAuthEvent({
+      eventType: "google_login",
+      success: false,
+      ipAddress: ipOf(req),
+      userAgent: uaOf(req),
+      errorMessage: err instanceof Error ? err.message : "google_oauth_failed",
+    });
     return failRedirect("oauth_failed");
   }
 });
