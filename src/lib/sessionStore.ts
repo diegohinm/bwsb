@@ -21,8 +21,10 @@ const { Pool } = pkg;
 
 const THIRTY_DAYS_MS = 30 * 24 * 60 * 60 * 1000;
 
-// Dedicated pool for the session store. connect-pg-simple manages its own
-// connections independently of Prisma.
+// Dedicated pool for the session store. This is the ONLY remaining direct use
+// of the pg driver: connect-pg-simple takes a pg Pool and issues its own SQL
+// against the `session` table, so it cannot be given the Prisma client. Every
+// other database access in this project goes through lib/prisma.ts.
 const sessionPool = new Pool({ connectionString: env.DATABASE_URL });
 
 const PgStore = connectPgSimple(session);

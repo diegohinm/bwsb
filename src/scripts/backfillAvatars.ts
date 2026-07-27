@@ -5,76 +5,73 @@
  * global default frog avatar. Users who already have a personalized avatar_url
  * are left untouched.
  *
- * Also ensures the avatar/Google columns exist so this can be run against an
- * older database without first running the full db:setup.
+ * The avatar/Google columns are part of the schema (prisma/schema.prisma) and
+ * are created by `prisma migrate deploy`, so this script no longer has to add
+ * them itself — it only moves data.
  *
- * SERVER-SIDE ONLY. Reads DATABASE_URL from the environment. Never logs its value.
+ * SERVER-SIDE ONLY. Connects with DATABASE_URL and never logs its value.
  *
  * Usage:
  *   npm run db:backfill-avatars
  */
 import "dotenv/config";
-import pkg from "pg";
+
+import { prisma, disconnectPrisma } from "../lib/prisma.js";
 import {
   DEFAULT_AVATAR_URL,
   DEFAULT_AVATAR_TYPE,
   RETIRED_DEFAULT_AVATAR_URLS,
 } from "../config/branding.js";
 
-const { Client } = pkg;
-
-function getDatabaseUrl(): string {
-  const url = process.env.DATABASE_URL;
-  if (!url || url.trim() === "") {
-    console.error("❌ DATABASE_URL is not set. Add it to bwsb/.env first.");
-    process.exit(1);
-  }
-  if (!/^postgres(ql)?:\/\//.test(url)) {
-    console.error("❌ DATABASE_URL must start with postgresql:// or postgres://");
-    process.exit(1);
-  }
-  return url;
+/**
+ * "No avatar" = NULL, empty, or whitespace-only. Rows still pointing at a
+ * retired default path also count: those were written by an older default, now
+ * 404, and are not personalized images. Anything else is a real custom avatar
+ * and is never overwritten.
+ */
+function needsDefaultAvatar(avatarUrl: string | null): boolean {
+  if (avatarUrl === null) return true;
+  const trimmed = avatarUrl.trim();
+  if (trimmed === "") return true;
+  return (RETIRED_DEFAULT_AVATAR_URLS as readonly string[]).includes(trimmed);
 }
 
 async function main(): Promise<void> {
-  const client = new Client({ connectionString: getDatabaseUrl() });
   try {
-    await client.connect();
+    // The whitespace-trimming rule above has no Prisma filter equivalent, so
+    // candidates are narrowed to the rows that are not already on the current
+    // default and then matched here.
+    const candidates = await prisma.appUsers.findMany({
+      where: { NOT: { avatarUrl: DEFAULT_AVATAR_URL } },
+      select: { id: true, avatarUrl: true },
+    });
 
-    // Make sure the columns exist (safe on already-migrated databases).
-    await client.query(
-      `ALTER TABLE public.app_users ADD COLUMN IF NOT EXISTS avatar_url  text;
-       ALTER TABLE public.app_users ADD COLUMN IF NOT EXISTS avatar_type text;`,
-    );
+    const ids = candidates
+      .filter((u) => needsDefaultAvatar(u.avatarUrl))
+      .map((u) => u.id);
 
-    // "No avatar" = NULL, empty, or whitespace-only. Rows still pointing at a
-    // retired default path are also repointed: those were written by an older
-    // default, now 404, and are not personalized images. Anything else is a
-    // real custom avatar and is never overwritten.
-    const result = await client.query(
-      `UPDATE public.app_users
-          SET avatar_url  = $1,
-              avatar_type = $2,
-              updated_at  = now()
-        WHERE (avatar_url IS NULL
-               OR trim(avatar_url) = ''
-               OR trim(avatar_url) = ANY($3::text[]))
-          AND coalesce(avatar_url, '') <> $1`,
-      [DEFAULT_AVATAR_URL, DEFAULT_AVATAR_TYPE, [...RETIRED_DEFAULT_AVATAR_URLS]],
-    );
+    if (ids.length === 0) {
+      console.log("✅ Every user already has an avatar — nothing to backfill.");
+      return;
+    }
 
-    console.log(
-      `✅ Backfilled default avatar for ${result.rowCount ?? 0} user(s) without one.`,
-    );
+    const { count } = await prisma.appUsers.updateMany({
+      where: { id: { in: ids } },
+      data: {
+        avatarUrl: DEFAULT_AVATAR_URL,
+        avatarType: DEFAULT_AVATAR_TYPE,
+        updatedAt: new Date(),
+      },
+    });
+
+    console.log(`✅ Backfilled default avatar for ${count} user(s) without one.`);
   } catch (err) {
     console.error(
       "❌ Avatar backfill failed:",
       err instanceof Error ? err.message : err,
     );
-    process.exit(1);
-  } finally {
-    await client.end();
+    process.exitCode = 1;
   }
 }
 
-void main();
+void main().finally(disconnectPrisma);

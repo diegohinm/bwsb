@@ -1,0 +1,15 @@
+// Typecheck-only config for prisma/seed.ts.
+//
+// The build tsconfig has rootDir "src" and emits to dist/, so it cannot include
+// a file outside src without changing the output layout (and breaking
+// main: dist/server.js). The seed runs through tsx and is never compiled, so it
+// gets its own no-emit pass instead. `npm run typecheck` runs both.
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "rootDir": "."
+  },
+  "include": ["prisma/**/*.ts", "src/**/*.ts"],
+  "exclude": ["node_modules", "dist"]
+}

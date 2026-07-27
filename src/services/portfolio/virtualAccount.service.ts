@@ -44,7 +44,8 @@ async function valuePosition(pos: VirtualPosition): Promise<{ marketValue: numbe
   const qty = num(pos.quantity);
   const avg = num(pos.avg_cost);
   if (pos.instrument === "stock") {
-    const snap = await marketRepository.latestSnapshot(pos.ticker);
+    // ticker is nullable on the column; without one there is nothing to mark to.
+    const snap = pos.ticker ? await marketRepository.latestSnapshot(pos.ticker) : null;
     const price = snap ? num(snap.price) : avg;
     return { marketValue: round(price * qty), unrealizedPl: round((price - avg) * qty) };
   }

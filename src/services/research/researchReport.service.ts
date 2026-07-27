@@ -4,25 +4,42 @@
  * Reads persisted research_reports and can synthesize a simple text summary
  * from current analytics as a baseline for auto-generated research.
  */
-import { query } from "../../lib/db.js";
+import { prisma } from "../../lib/prisma.js";
+import { toDbRow, toDbRows } from "../../lib/rows.js";
 import { metricsRepository } from "../../repositories/metrics.repository.js";
 import { betsRepository } from "../../repositories/bets.repository.js";
 import type { ResearchReport } from "../../types/domain.js";
 
 const DISCLAIMER = "Signals are informational only, not investment advice.";
 
+const UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 export const researchService = {
-  list(): Promise<ResearchReport[]> {
-    return query<ResearchReport>(
-      `SELECT * FROM public.research_reports ORDER BY created_at DESC`,
-    );
+  async list(): Promise<ResearchReport[]> {
+    const rows = await prisma.researchReports.findMany({
+      orderBy: { createdAt: "desc" },
+    });
+    return toDbRows<ResearchReport>("ResearchReports", rows);
   },
 
-  bySlugOrId(idOrSlug: string): Promise<ResearchReport | null> {
-    return query<ResearchReport>(
-      `SELECT * FROM public.research_reports WHERE slug = $1 OR id::text = $1 LIMIT 1`,
-      [idOrSlug],
-    ).then((rows) => rows[0] ?? null);
+  /**
+   * Look a report up by slug, falling back to its id.
+   *
+   * `id::text = $1` tolerated a non-uuid input; the id lookup is only attempted
+   * for something that actually is a uuid, because Prisma would otherwise raise
+   * a type error on the uuid column.
+   */
+  async bySlugOrId(idOrSlug: string): Promise<ResearchReport | null> {
+    const bySlug = await prisma.researchReports.findFirst({
+      where: { slug: idOrSlug },
+    });
+    if (bySlug) return toDbRow<ResearchReport>("ResearchReports", bySlug);
+
+    if (!UUID_RE.test(idOrSlug)) return null;
+
+    const byId = await prisma.researchReports.findUnique({ where: { id: idOrSlug } });
+    return byId ? toDbRow<ResearchReport>("ResearchReports", byId) : null;
   },
 
   /** Generate a plain-text market recap from current attention + positioning. */

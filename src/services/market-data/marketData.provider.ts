@@ -1,5 +1,6 @@
 import type {
   CandleTimeframe,
+  DelayedBarsResult,
   MarketCandle,
   MarketDataProviderName,
   MarketDataProviderStatus,
@@ -47,4 +48,24 @@ export interface MarketDataProvider {
     minStrike?: number;
     maxStrike?: number;
   }): Promise<OptionChainResponse>;
+
+  /**
+   * DELAYED INGESTION (optional) — newest historical bar at or before a cutoff,
+   * per symbol. Implemented by providers that can serve delayed data from a
+   * historical/REST endpoint without a real-time entitlement. The ingestion
+   * worker prefers this over `getQuotes` whenever the display mode is delayed:
+   * no live stream is opened and nothing fresher than the cutoff is requested.
+   */
+  getDelayedBars?(params: {
+    symbols: string[];
+    cutoffIso: string;
+    lookbackMinutes?: number;
+    wideLookbackDays?: number;
+  }): Promise<DelayedBarsResult>;
+
+  /** Previous daily close per symbol, for change / changePct. Best-effort. */
+  getPreviousDailyCloses?(
+    symbols: string[],
+    beforeIso: string,
+  ): Promise<Map<string, number>>;
 }

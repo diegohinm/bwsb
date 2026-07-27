@@ -1,7 +1,7 @@
 import { env } from "../../config/env.js";
 import { memoryCache } from "../cache/memoryCache.js";
 import { getMarketDataProvider, mockMarketDataProvider } from "./marketDataProvider.factory.js";
-import { currentSession } from "./marketData.util.js";
+import { currentSession, round2 } from "./marketData.util.js";
 import type {
   CandleTimeframe,
   MarketCandle,
@@ -212,6 +212,148 @@ export async function getQuotes(symbols: string[]): Promise<MarketQuote[]> {
   return result;
 }
 
+// ── Delayed ingestion (worker) ────────────────────────────────────────────────
+
+/**
+ * TRUE only when a live/real-time feed is explicitly licensed AND configured.
+ * Everything else — including MARKET_DATA_MODE=delayed, the default — must use
+ * the delayed HISTORICAL path: no live stream is opened and no real-time
+ * entitlement is required.
+ */
+export const liveIngestionEnabled = realtimeEnabled;
+
+/** Raised when the configured provider cannot serve delayed historical bars. */
+export class DelayedIngestionUnsupportedError extends Error {
+  constructor(provider: string) {
+    super(`${provider} cannot serve delayed historical bars (getDelayedBars not implemented).`);
+    this.name = "DelayedIngestionUnsupportedError";
+  }
+}
+
+export interface DelayedQuoteIngestion {
+  quotes: MarketQuote[];
+  /** now − MARKET_DATA_DELAY_MINUTES: nothing newer than this is published. */
+  cutoff: string;
+  windowStart: string;
+  /** min(cutoff, dataset availability end) — what was actually requested. */
+  windowEnd: string;
+  recordsFetched: number;
+  /** True when the range had to be widened to reach the last trading session. */
+  widened: boolean;
+  session: MarketSession;
+  marketOpen: boolean;
+  /** Configured publication delay (the floor we always apply). */
+  delayMinutes: number;
+  /** How far the provider's historical data reaches, when known. */
+  availableEnd: string | null;
+  /** Real age of the newest returned bar, in minutes. Null when none. */
+  barAgeMinutes: number | null;
+}
+
+/**
+ * Delayed quotes for the INGESTION WORKER, straight from the provider's
+ * historical endpoint.
+ *
+ * Deliberately does NOT fall back to mock data: the caller needs to tell "the
+ * provider published no new bar" (keep the previous snapshot) apart from "the
+ * provider is broken" (report an error). Silently substituting demo prices would
+ * destroy real stored quotes.
+ *
+ * An empty `quotes` array is a valid, non-error outcome — typical outside market
+ * hours.
+ */
+export async function getDelayedQuotesForIngestion(
+  symbols: string[],
+): Promise<DelayedQuoteIngestion> {
+  const provider = getMarketDataProvider();
+  if (typeof provider.getDelayedBars !== "function") {
+    throw new DelayedIngestionUnsupportedError(provider.name);
+  }
+
+  const delayMinutes = env.MARKET_DATA_DELAY_MINUTES;
+  const cutoff = new Date(Date.now() - delayMinutes * 60_000).toISOString();
+  const session = currentSession();
+  const marketOpen = session !== "closed";
+
+  const bars = await provider.getDelayedBars({ symbols, cutoffIso: cutoff });
+
+  // Previous daily close → change / changePct. Best-effort: a failure here must
+  // not cost us the quotes themselves.
+  let previousCloses = new Map<string, number>();
+  if (bars.latestBySymbol.size > 0 && typeof provider.getPreviousDailyCloses === "function") {
+    try {
+      previousCloses = await provider.getPreviousDailyCloses([...bars.latestBySymbol.keys()], cutoff);
+    } catch (err) {
+      recordError(err);
+    }
+  }
+
+  const mode = equityDisplayMode();
+  const nowMs = Date.now();
+  let newestBarMs: number | null = null;
+
+  const quotes: MarketQuote[] = [];
+  for (const [symbol, bar] of bars.latestBySymbol) {
+    const previousClose = previousCloses.get(symbol) ?? null;
+    const price = bar.close;
+    const change = price != null && previousClose != null ? round2(price - previousClose) : null;
+    const changePct =
+      price != null && previousClose ? round2(((price - previousClose) / previousClose) * 100) : null;
+
+    const barMs = Date.parse(bar.observedAt);
+    const ageMinutes = Math.max(0, Math.round((nowMs - barMs) / 60_000));
+    if (newestBarMs === null || barMs > newestBarMs) newestBarMs = barMs;
+
+    // Truthful freshness: when the FEED lags further than our delay policy (a
+    // historical dataset that ends at the previous session, a weekend, a
+    // holiday), say the real age instead of implying the policy delay.
+    const warning =
+      ageMinutes > 2 * delayMinutes
+        ? `Latest available bar is ${ageMinutes} minutes old (provider historical data ends ${bars.availableEnd ?? "earlier than now"}).`
+        : WARN_DELAYED;
+
+    quotes.push({
+      symbol,
+      assetType: "equity",
+      provider: provider.name,
+      source: provider.name,
+      displayMode: mode,
+      // The bar belongs to whatever session was live when it printed, which for
+      // a widened window is NOT the current one.
+      session: currentSession(new Date(bar.observedAt)),
+      price,
+      open: bar.open,
+      high: bar.high,
+      low: bar.low,
+      previousClose,
+      change,
+      changePct,
+      volume: bar.volume,
+      timestamp: bar.observedAt,
+      isMock: false,
+      isDelayed: true,
+      warning,
+    });
+  }
+
+  if (quotes.length > 0) recordSuccess(false);
+
+  return {
+    quotes,
+    cutoff,
+    windowStart: bars.windowStart,
+    windowEnd: bars.windowEnd,
+    recordsFetched: bars.recordsFetched,
+    widened: bars.widened,
+    session,
+    marketOpen,
+    delayMinutes,
+    availableEnd: bars.availableEnd ?? null,
+    barAgeMinutes:
+      newestBarMs === null ? null : Math.max(0, Math.round((nowMs - newestBarMs) / 60_000)),
+  };
+}
+
 // ── Candles ──────────────────────────────────────────────────────────────────
 
 export async function getCandles(params: {
@@ -265,6 +407,8 @@ export interface MarketMoversResponse {
   isMock: boolean;
   overnightEnabled: boolean;
   updatedAt: string;
+  /** Publication delay in minutes — drives the "Delayed 15m" badge. */
+  delayMinutes: number | null;
   warning?: string;
   // Structured provenance for clients that prefer a single meta object. Mirrors
   // the top-level fields (kept for backward compatibility).
@@ -299,6 +443,8 @@ function buildMoversResponse(args: {
   return {
     ...rest,
     overnightEnabled,
+    // Demo rows are not "delayed real data" — they have no delay to report.
+    delayMinutes: args.isMock ? null : env.MARKET_DATA_DELAY_MINUTES,
     ...(warning ? { warning } : {}),
     meta: {
       provider: args.provider,

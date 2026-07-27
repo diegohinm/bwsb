@@ -1,31 +1,65 @@
-import { query, queryOne } from "../lib/db.js";
+import { prisma } from "../lib/prisma.js";
+import { toDbRow, toDbRows } from "../lib/rows.js";
 import type { Ticker } from "../types/domain.js";
 
-/** Data access for tickers and their derived daily/narrative context. */
+/** Columns the ticker endpoints expose. */
+const TICKER_COLUMNS = {
+  ticker: true,
+  companyName: true,
+  exchange: true,
+  isActive: true,
+  isCommonWord: true,
+  createdAt: true,
+} as const;
+
+/**
+ * Data access for tickers and their derived daily/narrative context.
+ *
+ * Rows are returned with their database column names (see lib/rows.ts) because
+ * the ticker/search routes serialize them straight onto the wire.
+ */
 export const tickersRepository = {
-  listAll(): Promise<Ticker[]> {
-    return query<Ticker>(
-      `SELECT ticker, company_name, exchange, is_active, is_common_word, created_at
-       FROM public.tickers ORDER BY ticker ASC`,
-    );
+  async listAll(): Promise<Ticker[]> {
+    const rows = await prisma.tickers.findMany({
+      select: TICKER_COLUMNS,
+      orderBy: { ticker: "asc" },
+    });
+    return toDbRows<Ticker>("Tickers", rows);
   },
 
-  findByTicker(ticker: string): Promise<Ticker | null> {
-    return queryOne<Ticker>(
-      `SELECT ticker, company_name, exchange, is_active, is_common_word, created_at
-       FROM public.tickers WHERE ticker = $1`,
-      [ticker],
-    );
+  async findByTicker(ticker: string): Promise<Ticker | null> {
+    const row = await prisma.tickers.findUnique({
+      where: { ticker },
+      select: TICKER_COLUMNS,
+    });
+    return row ? toDbRow<Ticker>("Tickers", row) : null;
   },
 
-  search(term: string, limit = 20): Promise<Ticker[]> {
-    return query<Ticker>(
-      `SELECT ticker, company_name, exchange, is_active, is_common_word, created_at
-       FROM public.tickers
-       WHERE ticker ILIKE $1 OR company_name ILIKE $1
-       ORDER BY (ticker ILIKE $2) DESC, ticker ASC
-       LIMIT $3`,
-      [`%${term}%`, `${term}%`, limit],
+  /** Substring match on symbol or company, with symbol prefix matches first. */
+  async search(term: string, limit = 20): Promise<Ticker[]> {
+    const rows = await prisma.tickers.findMany({
+      where: {
+        OR: [
+          { ticker: { contains: term, mode: "insensitive" } },
+          { companyName: { contains: term, mode: "insensitive" } },
+        ],
+      },
+      select: TICKER_COLUMNS,
+      orderBy: { ticker: "asc" },
+    });
+
+    const prefix = term.toLowerCase();
+    return toDbRows<Ticker>(
+      "Tickers",
+      // `ORDER BY (ticker ILIKE 'term%') DESC, ticker ASC` — a boolean sort key
+      // Prisma cannot express, applied here over the already symbol-sorted rows.
+      [...rows]
+        .sort(
+          (a, b) =>
+            Number(b.ticker.toLowerCase().startsWith(prefix)) -
+            Number(a.ticker.toLowerCase().startsWith(prefix)),
+        )
+        .slice(0, limit),
     );
   },
 
@@ -33,50 +67,102 @@ export const tickersRepository = {
    * Global ticker/company search for the header search bar.
    * Ranking: exact ticker → ticker starts-with → company contains → ticker asc.
    */
-  searchTickers(term: string, limit = 8): Promise<Ticker[]> {
-    return query<Ticker>(
-      `SELECT ticker, company_name, exchange, is_active, is_common_word
-       FROM public.tickers
-       WHERE ticker ILIKE $1 OR company_name ILIKE $2
-       ORDER BY
-         CASE
-           WHEN upper(ticker) = upper($3) THEN 0
-           WHEN ticker ILIKE $1 THEN 1
-           WHEN company_name ILIKE $2 THEN 2
-           ELSE 3
-         END,
-         ticker ASC
-       LIMIT $4`,
-      [`${term}%`, `%${term}%`, term, limit],
+  async searchTickers(term: string, limit = 8): Promise<Ticker[]> {
+    const rows = await prisma.tickers.findMany({
+      where: {
+        OR: [
+          { ticker: { startsWith: term, mode: "insensitive" } },
+          { companyName: { contains: term, mode: "insensitive" } },
+        ],
+      },
+      select: {
+        ticker: true,
+        companyName: true,
+        exchange: true,
+        isActive: true,
+        isCommonWord: true,
+      },
+      orderBy: { ticker: "asc" },
+    });
+
+    const needle = term.toLowerCase();
+    const priority = (t: { ticker: string; companyName: string | null }): number => {
+      if (t.ticker.toLowerCase() === needle) return 0;
+      if (t.ticker.toLowerCase().startsWith(needle)) return 1;
+      if (t.companyName?.toLowerCase().includes(needle)) return 2;
+      return 3;
+    };
+
+    // The CASE ranking, applied over rows already sorted by symbol so ties keep
+    // their alphabetical order.
+    return toDbRows<Ticker>(
+      "Tickers",
+      [...rows].sort((a, b) => priority(a) - priority(b)).slice(0, limit),
     );
   },
 
-  dailyMetrics(ticker: string, days = 14) {
-    return query(
-      `SELECT ticker, day, mentions, unique_authors, bullish, bearish, neutral,
-              sentiment_score, mention_share
-       FROM public.ticker_daily_metrics
-       WHERE ticker = $1 AND day >= current_date - $2::int
-       ORDER BY day ASC`,
-      [ticker, days],
-    );
+  /** Daily metrics for the trailing `days` days, oldest first. */
+  async dailyMetrics(ticker: string, days = 14) {
+    const since = new Date();
+    since.setUTCHours(0, 0, 0, 0);
+    since.setUTCDate(since.getUTCDate() - days);
+
+    const rows = await prisma.tickerDailyMetrics.findMany({
+      where: { ticker, day: { gte: since } },
+      select: {
+        ticker: true,
+        day: true,
+        mentions: true,
+        uniqueAuthors: true,
+        bullish: true,
+        bearish: true,
+        neutral: true,
+        sentimentScore: true,
+        mentionShare: true,
+      },
+      orderBy: { day: "asc" },
+    });
+    return toDbRows("TickerDailyMetrics", rows);
   },
 
-  narratives(ticker: string) {
-    return query(
-      `SELECT id, ticker, narrative, narrative_type, strength, first_seen_at, last_seen_at, metadata
-       FROM public.narrative_events WHERE ticker = $1 ORDER BY strength DESC`,
-      [ticker],
-    );
+  async narratives(ticker: string) {
+    const rows = await prisma.narrativeEvents.findMany({
+      where: { ticker },
+      select: {
+        id: true,
+        ticker: true,
+        narrative: true,
+        narrativeType: true,
+        strength: true,
+        firstSeenAt: true,
+        lastSeenAt: true,
+        metadata: true,
+      },
+      orderBy: { strength: "desc" },
+    });
+    return toDbRows("NarrativeEvents", rows);
   },
 
-  ddQuality(ticker: string) {
-    return query(
-      `SELECT id, reddit_post_id, ticker, score, category, explanation,
-              evidence_score, source_score, calculation_score, catalyst_score,
-              risk_disclosure_score, originality_score, created_at
-       FROM public.dd_quality_scores WHERE ticker = $1 ORDER BY score DESC`,
-      [ticker],
-    );
+  async ddQuality(ticker: string) {
+    const rows = await prisma.ddQualityScores.findMany({
+      where: { ticker },
+      select: {
+        id: true,
+        redditPostId: true,
+        ticker: true,
+        score: true,
+        category: true,
+        explanation: true,
+        evidenceScore: true,
+        sourceScore: true,
+        calculationScore: true,
+        catalystScore: true,
+        riskDisclosureScore: true,
+        originalityScore: true,
+        createdAt: true,
+      },
+      orderBy: { score: "desc" },
+    });
+    return toDbRows("DdQualityScores", rows);
   },
 };

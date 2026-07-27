@@ -1,8 +1,21 @@
 // Prisma schema for bwsb (backend for YOLOPulse, internal project "wsb").
 //
-// The datasource points at DATABASE_URL, which MUST be a PostgreSQL connection
-// string (server-side only, never exposed to the frontend). Reddit is the only
-// identity provider — users are always keyed by `redditId`, never by username.
+// This file is the SINGLE SOURCE OF TRUTH for the database schema. It was
+// introspected from the existing production database and baselined as
+// prisma/migrations/0_init. Change the schema here, then run
+// `npx prisma migrate dev --name <change>` — never edit the database by hand
+// and never run `prisma db push`.
+//
+// Naming: models are PascalCase and fields camelCase, mapped back to the
+// unchanged snake_case database names with @@map / @map. The database is never
+// renamed.
+//
+// PostgreSQL behaviour Prisma cannot express (the pgcrypto extension, RLS,
+// partial indexes) lives in the migration SQL, not in application code. See
+// prisma/migrations/0_init/migration.sql.
+//
+// The datasource reads DATABASE_URL — server-side only, never exposed to the
+// frontend.
 
 generator client {
   provider = "prisma-client-js"
@@ -13,26 +26,1464 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
-/// A local user account. Identity is provided by Reddit OAuth; we never store
-/// Reddit passwords, access tokens, or refresh tokens. `redditId` is the stable
-/// primary identity — usernames can change and must never be used as identity.
-model User {
-  id String @id @default(cuid())
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model AnonymizedAuthors {
+  authorHash                String                      @id @map("author_hash")
+  firstSeenAt               DateTime                    @default(now()) @map("first_seen_at") @db.Timestamptz(6)
+  lastSeenAt                DateTime                    @default(now()) @map("last_seen_at") @db.Timestamptz(6)
+  accountAgeDays            Int?                        @map("account_age_days")
+  postsCount                Int                         @default(0) @map("posts_count")
+  resolvedSignals           Int                         @default(0) @map("resolved_signals")
+  hitRate                   Decimal                     @default(0) @map("hit_rate") @db.Decimal(5, 4)
+  reputationScore           Decimal                     @default(0) @map("reputation_score") @db.Decimal(6, 2)
+  isNewAccount              Boolean                     @default(false) @map("is_new_account")
+  metadata                  Json                        @default("{}")
+  authorReputationSnapshots AuthorReputationSnapshots[]
+  authorSignalHistory       AuthorSignalHistory[]
 
-  // Reddit identity (from GET https://oauth.reddit.com/api/v1/me).
+  @@map("anonymized_authors")
+}
+
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model ApiUsageEvents {
+  id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId    String?  @map("user_id")
+  route     String
+  method    String   @default("GET")
+  status    Int?
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  @@map("api_usage_events")
+}
+
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model AppUsers {
+  id                              String                            @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  email                           String                            @unique
+  emailNormalized                 String                            @unique @map("email_normalized")
+  emailVerifiedAt                 DateTime?                         @map("email_verified_at") @db.Timestamptz(6)
+  passwordHash                    String?                           @map("password_hash")
+  displayName                     String?                           @map("display_name")
+  avatarUrl                       String?                           @map("avatar_url")
+  createdAt                       DateTime                          @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt                       DateTime                          @default(now()) @map("updated_at") @db.Timestamptz(6)
+  lastLoginAt                     DateTime?                         @map("last_login_at") @db.Timestamptz(6)
+  avatarType                      String?                           @map("avatar_type")
+  avatarSeed                      String?                           @map("avatar_seed")
+  googleSub                       String?                           @map("google_sub")
+  authProvider                    String?                           @map("auth_provider")
+  authEvents                      AuthEvents[]
+  competitionLeaderboardSnapshots CompetitionLeaderboardSnapshots[]
+  competitionParticipants         CompetitionParticipants[]
+  emailVerificationTokens         EmailVerificationTokens[]
+  passwordResetTokens             PasswordResetTokens[]
+  redditAccounts                  RedditAccounts[]
+  redditVerificationRequests      RedditVerificationRequests[]
+  userNotifications               UserNotifications[]
+  userSessions                    UserSessions[]
+  virtualAccounts                 VirtualAccounts?
+  virtualPositions                VirtualPositions[]
+  virtualTrades                   VirtualTrades[]
+
+  @@index([emailNormalized])
+  @@map("app_users")
+}
+
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model AuthEvents {
+  id           String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId       String?   @map("user_id") @db.Uuid
+  eventType    String    @map("event_type")
+  success      Boolean
+  ipAddress    String?   @map("ip_address")
+  userAgent    String?   @map("user_agent")
+  errorMessage String?   @map("error_message")
+  createdAt    DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  appUsers     AppUsers? @relation(fields: [userId], references: [id], onUpdate: NoAction)
+
+  @@index([userId], map: "auth_events_user_idx")
+  @@map("auth_events")
+}
+
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model AuthorReputationSnapshots {
+  id                String             @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  authorHash        String?            @map("author_hash")
+  snapshotAt        DateTime           @default(now()) @map("snapshot_at") @db.Timestamptz(6)
+  reputationScore   Decimal            @default(0) @map("reputation_score") @db.Decimal(6, 2)
+  hitRate           Decimal            @default(0) @map("hit_rate") @db.Decimal(5, 4)
+  resolvedSignals   Int                @default(0) @map("resolved_signals")
+  metadata          Json               @default("{}")
+  anonymizedAuthors AnonymizedAuthors? @relation(fields: [authorHash], references: [authorHash], onDelete: Cascade, onUpdate: NoAction)
+
+  @@map("author_reputation_snapshots")
+}
+
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model AuthorSignalHistory {
+  id                String             @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  authorHash        String?            @map("author_hash")
+  ticker            String?
+  signalType        String?            @map("signal_type")
+  stance            String?
+  signaledAt        DateTime           @default(now()) @map("signaled_at") @db.Timestamptz(6)
+  resolvedAt        DateTime?          @map("resolved_at") @db.Timestamptz(6)
+  outcome           String?
+  returnPct         Decimal?           @map("return_pct") @db.Decimal
+  wasEarly          Boolean?           @map("was_early")
+  metadata          Json               @default("{}")
+  anonymizedAuthors AnonymizedAuthors? @relation(fields: [authorHash], references: [authorHash], onDelete: Cascade, onUpdate: NoAction)
+
+  @@index([authorHash], map: "author_signal_hist_author_idx")
+  @@map("author_signal_history")
+}
+
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model BacktestResults {
+  id                    String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  backtestRunId         String?       @map("backtest_run_id") @db.Uuid
+  observations          Int?
+  winRate               Decimal?      @map("win_rate") @db.Decimal
+  medianReturn          Decimal?      @map("median_return") @db.Decimal
+  averageReturn         Decimal?      @map("average_return") @db.Decimal
+  maxDrawdown           Decimal?      @map("max_drawdown") @db.Decimal
+  spyAdjustedReturn     Decimal?      @map("spy_adjusted_return") @db.Decimal
+  optionEstimatedReturn Decimal?      @map("option_estimated_return") @db.Decimal
+  resultDistribution    Json          @default("{}") @map("result_distribution")
+  createdAt             DateTime      @default(now()) @map("created_at") @db.Timestamptz(6)
+  backtestRuns          BacktestRuns? @relation(fields: [backtestRunId], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@map("backtest_results")
+}
+
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model BacktestRuns {
+  id              String            @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  name            String?
+  query           Json              @default("{}")
+  createdAt       DateTime          @default(now()) @map("created_at") @db.Timestamptz(6)
+  backtestResults BacktestResults[]
+
+  @@map("backtest_runs")
+}
+
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model BetExtractionErrors {
+  id              String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  redditPostId    String?  @map("reddit_post_id")
+  redditCommentId String?  @map("reddit_comment_id")
+  rawText         String?  @map("raw_text")
+  errorType       String?  @map("error_type")
+  detail          Json     @default("{}")
+  createdAt       DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  @@map("bet_extraction_errors")
+}
+
+/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model BetLegs {
+  id                String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  betId             String?   @map("bet_id") @db.Uuid
+  legType           String?   @map("leg_type")
+  side              String?
+  optionType        String?   @map("option_type")
+  strike            Decimal?  @db.Decimal
+  expirationDate    DateTime? @map("expiration_date") @db.Date
+  contracts         Int?
+  shares            Decimal?  @db.Decimal
+  premium           Decimal?  @db.Decimal
+  price             Decimal?  @db.Decimal
+  dte               Int?
+  moneyness         String?
+  delta             Decimal?  @db.Decimal
+  theta             Decimal?  @db.Decimal
+  vega              Decimal?  @db.Decimal
+  impliedVolatility Decimal?  @map("implied_volatility") @db.Decimal
+  bid               Decimal?  @db.Decimal
+  ask               Decimal?  @db.Decimal
+  mid               Decimal?  @db.Decimal
+  createdAt         DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  bets              Bets?     @relation(fields: [betId], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@index([betId], map: "bet_legs_bet_idx")
+  @@index([expirationDate], map: "bet_legs_expiration_idx")
+  @@map("bet_legs")
+}
+
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model BetLifecycleEvents {
+  id         String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  betId      String?  @map("bet_id") @db.Uuid
+  eventType  String   @map("event_type")
+  detail     Json     @default("{}")
+  occurredAt DateTime @default(now()) @map("occurred_at") @db.Timestamptz(6)
+  bets       Bets?    @relation(fields: [betId], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@map("bet_lifecycle_events")
+}
+
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model BetPerformance {
+  id                String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  betId             String?   @map("bet_id") @db.Uuid
+  ticker            String?
+  realizedReturnPct Decimal?  @map("realized_return_pct") @db.Decimal
+  peakReturnPct     Decimal?  @map("peak_return_pct") @db.Decimal
+  troughReturnPct   Decimal?  @map("trough_return_pct") @db.Decimal
+  outcome           String?
+  spyAdjustedReturn Decimal?  @map("spy_adjusted_return") @db.Decimal
+  earlyLateScore    Decimal?  @map("early_late_score") @db.Decimal
+  resolvedAt        DateTime? @map("resolved_at") @db.Timestamptz(6)
+  metadata          Json      @default("{}")
+  createdAt         DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  bets              Bets?     @relation(fields: [betId], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@index([betId], map: "bet_performance_bet_idx")
+  @@map("bet_performance")
+}
+
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model BetSnapshots {
+  id                     String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  betId                  String?  @map("bet_id") @db.Uuid
+  snapshotAt             DateTime @default(now()) @map("snapshot_at") @db.Timestamptz(6)
+  underlyingPrice        Decimal? @map("underlying_price") @db.Decimal
+  estimatedOptionValue   Decimal? @map("estimated_option_value") @db.Decimal
+  estimatedPositionValue Decimal? @map("estimated_position_value") @db.Decimal
+  returnPct              Decimal? @map("return_pct") @db.Decimal
+  unrealizedPl           Decimal? @map("unrealized_pl") @db.Decimal
+  maxGainSoFar           Decimal? @map("max_gain_so_far") @db.Decimal
+  maxLossSoFar           Decimal? @map("max_loss_so_far") @db.Decimal
+  metadata               Json     @default("{}")
+  bets                   Bets?    @relation(fields: [betId], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@index([betId], map: "bet_snapshots_bet_idx")
+  @@map("bet_snapshots")
+}
+
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model BetVerifications {
+  id                String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  betId             String?  @map("bet_id") @db.Uuid
+  verificationLevel String   @map("verification_level")
+  method            String?
+  passed            Boolean  @default(false)
+  detail            Json     @default("{}")
+  createdAt         DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  bets              Bets?    @relation(fields: [betId], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@map("bet_verifications")
+}
+
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model BetaAdjustedResults {
+  id                 String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  ticker             String?
+  signalRef          String?  @map("signal_ref")
+  windowDays         Int?     @map("window_days")
+  rawReturn          Decimal? @map("raw_return") @db.Decimal
+  spyReturn          Decimal? @map("spy_return") @db.Decimal
+  beta               Decimal? @db.Decimal
+  betaAdjustedReturn Decimal? @map("beta_adjusted_return") @db.Decimal
+  createdAt          DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  tickers            Tickers? @relation(fields: [ticker], references: [ticker], onDelete: NoAction, onUpdate: NoAction)
+
+  @@map("beta_adjusted_results")
+}
+
+/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model Bets {
+  id                   String               @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  sourceType           String               @default("reddit") @map("source_type")
+  redditPostId         String?              @map("reddit_post_id")
+  redditCommentId      String?              @map("reddit_comment_id")
+  authorHash           String?              @map("author_hash")
+  ticker               String?
+  direction            String?
+  instrument           String?
+  optionType           String?              @map("option_type")
+  positionIntent       String?              @map("position_intent")
+  status               String?
+  declaredCapital      Decimal?             @map("declared_capital") @db.Decimal
+  verifiedCapital      Decimal?             @map("verified_capital") @db.Decimal
+  notionalExposure     Decimal?             @map("notional_exposure") @db.Decimal
+  maxLoss              Decimal?             @map("max_loss") @db.Decimal
+  maxGain              Decimal?             @map("max_gain") @db.Decimal
+  breakeven            Decimal?             @db.Decimal
+  entryUnderlyingPrice Decimal?             @map("entry_underlying_price") @db.Decimal
+  entryTimestamp       DateTime?            @map("entry_timestamp") @db.Timestamptz(6)
+  extractionConfidence Decimal?             @map("extraction_confidence") @db.Decimal
+  verificationLevel    String?              @map("verification_level")
+  rawEvidence          Json                 @default("{}") @map("raw_evidence")
+  metadata             Json                 @default("{}")
+  createdAt            DateTime             @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt            DateTime             @default(now()) @map("updated_at") @db.Timestamptz(6)
+  betLegs              BetLegs[]
+  betLifecycleEvents   BetLifecycleEvents[]
+  betPerformance       BetPerformance[]
+  betSnapshots         BetSnapshots[]
+  betVerifications     BetVerifications[]
+  redditPosts          RedditPosts?         @relation(fields: [redditPostId], references: [redditPostId], onUpdate: NoAction)
+  tickers              Tickers?             @relation(fields: [ticker], references: [ticker], onDelete: NoAction, onUpdate: NoAction)
+
+  @@index([authorHash], map: "bets_author_idx")
+  @@index([createdAt], map: "bets_created_idx")
+  @@index([redditPostId], map: "bets_post_idx")
+  @@index([ticker])
+  @@map("bets")
+}
+
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model CatalystEvents {
+  id           String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  ticker       String?
+  catalystType String    @map("catalyst_type")
+  title        String?
+  eventDate    DateTime? @map("event_date") @db.Date
+  confirmed    Boolean   @default(false)
+  metadata     Json      @default("{}")
+  createdAt    DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  @@map("catalyst_events")
+}
+
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model CompetitionLeaderboardSnapshots {
+  id            String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  competitionId String?       @map("competition_id") @db.Uuid
+  userId        String        @map("user_id") @db.Uuid
+  rank          Int?
+  equityValue   Decimal?      @map("equity_value") @db.Decimal
+  returnPct     Decimal?      @map("return_pct") @db.Decimal
+  snapshotAt    DateTime      @default(now()) @map("snapshot_at") @db.Timestamptz(6)
+  competitions  Competitions? @relation(fields: [competitionId], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  appUsers      AppUsers      @relation(fields: [userId], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@index([competitionId], map: "competition_leaderboard_comp_idx")
+  @@map("competition_leaderboard_snapshots")
+}
+
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model CompetitionParticipants {
+  id               String           @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  competitionId    String?          @map("competition_id") @db.Uuid
+  userId           String           @map("user_id") @db.Uuid
+  virtualAccountId String?          @map("virtual_account_id") @db.Uuid
+  joinedAt         DateTime         @default(now()) @map("joined_at") @db.Timestamptz(6)
+  competitions     Competitions?    @relation(fields: [competitionId], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  appUsers         AppUsers         @relation(fields: [userId], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  virtualAccounts  VirtualAccounts? @relation(fields: [virtualAccountId], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@unique([competitionId, userId], map: "competition_participants_uniq")
+  @@index([competitionId], map: "competition_participants_comp_idx")
+  @@map("competition_participants")
+}
+
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+/// A paper-trading season. `slug` is the stable human-readable key the seed
+/// upserts on, so re-seeding updates the season in place instead of creating a
+/// duplicate every run. Nullable because competitions created before the column
+/// existed have none, and unique so two seasons can never share one.
+model Competitions {
+  id                              String                            @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  slug                            String?                           @unique
+  name                            String
+  description                     String?
+  startsAt                        DateTime?                         @map("starts_at") @db.Timestamptz(6)
+  endsAt                          DateTime?                         @map("ends_at") @db.Timestamptz(6)
+  startingCash                    Decimal?                          @default(100000) @map("starting_cash") @db.Decimal
+  isActive                        Boolean?                          @default(true) @map("is_active")
+  createdAt                       DateTime                          @default(now()) @map("created_at") @db.Timestamptz(6)
+  competitionLeaderboardSnapshots CompetitionLeaderboardSnapshots[]
+  competitionParticipants         CompetitionParticipants[]
+
+  @@map("competitions")
+}
+
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model DailySummaries {
+  id         String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId     String?  @map("user_id")
+  day        DateTime @db.Date
+  summary    String?
+  highlights Json     @default("[]")
+  createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  @@unique([userId, day], map: "daily_summaries_uniq")
+  @@map("daily_summaries")
+}
+
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model DdQualityScores {
+  id                  String       @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  redditPostId        String?      @unique(map: "dd_quality_scores_uniq") @map("reddit_post_id")
+  ticker              String?
+  score               Decimal?     @db.Decimal
+  evidenceScore       Decimal?     @map("evidence_score") @db.Decimal
+  sourceScore         Decimal?     @map("source_score") @db.Decimal
+  calculationScore    Decimal?     @map("calculation_score") @db.Decimal
+  catalystScore       Decimal?     @map("catalyst_score") @db.Decimal
+  riskDisclosureScore Decimal?     @map("risk_disclosure_score") @db.Decimal
+  originalityScore    Decimal?     @map("originality_score") @db.Decimal
+  category            String?
+  explanation         String?
+  createdAt           DateTime     @default(now()) @map("created_at") @db.Timestamptz(6)
+  redditPosts         RedditPosts? @relation(fields: [redditPostId], references: [redditPostId], onDelete: Cascade, onUpdate: NoAction)
+  tickers             Tickers?     @relation(fields: [ticker], references: [ticker], onDelete: NoAction, onUpdate: NoAction)
+
+  @@index([ticker], map: "dd_scores_ticker_idx")
+  @@map("dd_quality_scores")
+}
+
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model DeletedOrChangedContentEvents {
+  id              String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  contentType     String   @default("post") @map("content_type")
+  redditPostId    String?  @map("reddit_post_id")
+  redditCommentId String?  @map("reddit_comment_id")
+  ticker          String?
+  eventType       String   @map("event_type")
+  detail          Json     @default("{}")
+  detectedAt      DateTime @default(now()) @map("detected_at") @db.Timestamptz(6)
+
+  @@map("deleted_or_changed_content_events")
+}
+
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model EmailVerificationTokens {
+  id        String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId    String    @map("user_id") @db.Uuid
+  tokenHash String    @unique @map("token_hash")
+  expiresAt DateTime  @map("expires_at") @db.Timestamptz(6)
+  usedAt    DateTime? @map("used_at") @db.Timestamptz(6)
+  createdAt DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  appUsers  AppUsers  @relation(fields: [userId], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@index([tokenHash], map: "email_verification_tokens_hash_idx")
+  @@map("email_verification_tokens")
+}
+
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model ExternalSocialSnapshots {
+  id         String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  ticker     String?
+  platform   String   @default("stub")
+  snapshotAt DateTime @default(now()) @map("snapshot_at") @db.Timestamptz(6)
+  mentions   Int?
+  sentiment  Decimal? @db.Decimal
+  metadata   Json     @default("{}")
+
+  @@map("external_social_snapshots")
+}
+
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model InsiderActivityEvents {
+  id              String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  ticker          String?
+  insiderRole     String?   @map("insider_role")
+  transactionType String?   @map("transaction_type")
+  shares          Decimal?  @db.Decimal
+  value           Decimal?  @db.Decimal
+  filedAt         DateTime? @map("filed_at") @db.Timestamptz(6)
+  source          String    @default("stub")
+  metadata        Json      @default("{}")
+  createdAt       DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  @@map("insider_activity_events")
+}
+
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model MarketAttentionIndexes {
+  id          String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  scope       String   @default("global")
+  bucketStart DateTime @map("bucket_start") @db.Timestamptz(6)
+  indexValue  Decimal  @default(0) @map("index_value") @db.Decimal(6, 2)
+  label       String?
+  components  Json     @default("{}")
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  @@unique([scope, bucketStart], map: "market_attention_indexes_uniq")
+  @@map("market_attention_indexes")
+}
+
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model MarketDataCache {
+  id        String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  cacheKey  String    @unique @map("cache_key")
+  provider  String
+  payload   Json
+  expiresAt DateTime  @map("expires_at") @db.Timestamptz(6)
+  createdAt DateTime? @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt DateTime? @default(now()) @map("updated_at") @db.Timestamptz(6)
+
+  @@index([cacheKey], map: "market_data_cache_key_idx")
+  @@map("market_data_cache")
+}
+
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model MarketMoversSnapshots {
+  id           String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  session      String
+  symbol       String
+  price        Decimal? @db.Decimal
+  changePct    Decimal? @map("change_pct") @db.Decimal
+  volume       Decimal? @db.Decimal
+  rank         Int?
+  provider     String?
+  source       String?
+  displayMode  String?  @map("display_mode")
+  delayMinutes Int?     @map("delay_minutes")
+  isMock       Boolean  @default(false) @map("is_mock")
+  snapshotAt   DateTime @map("snapshot_at") @db.Timestamptz(6)
+  createdAt    DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  @@index([session, snapshotAt(sort: Desc)], map: "market_movers_snapshots_session_idx")
+  @@map("market_movers_snapshots")
+}
+
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model MarketProviderEvents {
+  id        String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  provider  String
+  eventType String    @map("event_type")
+  status    String
+  message   String?
+  metadata  Json?
+  createdAt DateTime? @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  @@index([provider, createdAt(sort: Desc)], map: "market_provider_events_provider_idx")
+  @@map("market_provider_events")
+}
+
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model MarketQuoteSnapshots {
+  id           String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  symbol       String
+  price        Decimal?  @db.Decimal
+  change       Decimal?  @db.Decimal
+  changePct    Decimal?  @map("change_pct") @db.Decimal
+  volume       Decimal?  @db.Decimal
+  session      String?
+  provider     String?
+  source       String?
+  displayMode  String?   @map("display_mode")
+  delayMinutes Int?      @map("delay_minutes")
+  isMock       Boolean   @default(false) @map("is_mock")
+  isDelayed    Boolean   @default(true) @map("is_delayed")
+  observedAt   DateTime? @map("observed_at") @db.Timestamptz(6)
+  createdAt    DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  @@index([symbol, observedAt(sort: Desc)], map: "market_quote_snapshots_symbol_idx")
+  @@map("market_quote_snapshots")
+}
+
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model MarketQuotesLatest {
+  symbol       String    @id
+  price        Decimal?  @db.Decimal
+  change       Decimal?  @db.Decimal
+  changePct    Decimal?  @map("change_pct") @db.Decimal
+  volume       Decimal?  @db.Decimal
+  session      String?
+  provider     String?
+  source       String?
+  displayMode  String?   @map("display_mode")
+  delayMinutes Int?      @map("delay_minutes")
+  isMock       Boolean   @default(false) @map("is_mock")
+  isDelayed    Boolean   @default(true) @map("is_delayed")
+  observedAt   DateTime? @map("observed_at") @db.Timestamptz(6)
+  updatedAt    DateTime  @default(now()) @map("updated_at") @db.Timestamptz(6)
+
+  @@map("market_quotes_latest")
+}
+
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model MarketQuotesSnapshots {
+  id            String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  symbol        String
+  provider      String
+  source        String
+  displayMode   String    @map("display_mode")
+  session       String
+  price         Decimal?  @db.Decimal
+  bid           Decimal?  @db.Decimal
+  ask           Decimal?  @db.Decimal
+  open          Decimal?  @db.Decimal
+  high          Decimal?  @db.Decimal
+  low           Decimal?  @db.Decimal
+  previousClose Decimal?  @map("previous_close") @db.Decimal
+  change        Decimal?  @db.Decimal
+  changePct     Decimal?  @map("change_pct") @db.Decimal
+  volume        Decimal?  @db.Decimal
+  observedAt    DateTime  @map("observed_at") @db.Timestamptz(6)
+  createdAt     DateTime? @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  @@index([symbol, observedAt(sort: Desc)], map: "market_quotes_snapshots_symbol_idx")
+  @@map("market_quotes_snapshots")
+}
+
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model MarketSnapshots {
+  id         String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  ticker     String
+  snapshotAt DateTime @default(now()) @map("snapshot_at") @db.Timestamptz(6)
+  price      Decimal? @db.Decimal
+  changePct  Decimal? @map("change_pct") @db.Decimal
+  volume     BigInt?
+  avgVolume  BigInt?  @map("avg_volume")
+  marketCap  Decimal? @map("market_cap") @db.Decimal
+  beta       Decimal? @db.Decimal
+  source     String   @default("stub")
+  metadata   Json     @default("{}")
+
+  @@unique([ticker, snapshotAt], map: "market_snapshots_uniq")
+  @@index([snapshotAt], map: "market_snapshots_at_idx")
+  @@index([ticker])
+  @@map("market_snapshots")
+}
+
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model NarrativeEvents {
+  id            String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  ticker        String?
+  narrative     String
+  narrativeType String?  @map("narrative_type")
+  strength      Decimal? @db.Decimal
+  firstSeenAt   DateTime @default(now()) @map("first_seen_at") @db.Timestamptz(6)
+  lastSeenAt    DateTime @default(now()) @map("last_seen_at") @db.Timestamptz(6)
+  metadata      Json     @default("{}")
+  tickers       Tickers? @relation(fields: [ticker], references: [ticker], onDelete: NoAction, onUpdate: NoAction)
+
+  @@index([ticker])
+  @@map("narrative_events")
+}
+
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model NarrativeTransitions {
+  id            String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  ticker        String?
+  fromNarrative String?  @map("from_narrative")
+  toNarrative   String?  @map("to_narrative")
+  transitionAt  DateTime @default(now()) @map("transition_at") @db.Timestamptz(6)
+  confidence    Decimal? @db.Decimal
+  metadata      Json     @default("{}")
+  tickers       Tickers? @relation(fields: [ticker], references: [ticker], onDelete: NoAction, onUpdate: NoAction)
+
+  @@map("narrative_transitions")
+}
+
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model NewsEvents {
+  id          String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  ticker      String?
+  headline    String
+  url         String?
+  source      String    @default("stub")
+  sentiment   Decimal?  @db.Decimal
+  publishedAt DateTime? @map("published_at") @db.Timestamptz(6)
+  metadata    Json      @default("{}")
+  createdAt   DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  @@index([ticker])
+  @@map("news_events")
+}
+
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model OptionChainQuoteSnapshots {
+  id                String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  underlying        String
+  optionSymbol      String    @map("option_symbol")
+  provider          String
+  source            String
+  displayMode       String    @map("display_mode")
+  expiration        DateTime? @db.Date
+  strike            Decimal?  @db.Decimal
+  type              String?
+  bid               Decimal?  @db.Decimal
+  ask               Decimal?  @db.Decimal
+  last              Decimal?  @db.Decimal
+  mark              Decimal?  @db.Decimal
+  volume            Decimal?  @db.Decimal
+  openInterest      Decimal?  @map("open_interest") @db.Decimal
+  impliedVolatility Decimal?  @map("implied_volatility") @db.Decimal
+  delta             Decimal?  @db.Decimal
+  gamma             Decimal?  @db.Decimal
+  theta             Decimal?  @db.Decimal
+  vega              Decimal?  @db.Decimal
+  observedAt        DateTime  @map("observed_at") @db.Timestamptz(6)
+  createdAt         DateTime? @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  @@index([underlying, expiration, strike, type], map: "option_chain_quote_snapshots_key_idx")
+  @@map("option_chain_quote_snapshots")
+}
+
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model OptionChainSnapshots {
+  id                      String                    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  underlying              String
+  snapshotAt              DateTime                  @default(now()) @map("snapshot_at") @db.Timestamptz(6)
+  expirationDate          DateTime?                 @map("expiration_date") @db.Date
+  source                  String                    @default("stub")
+  metadata                Json                      @default("{}")
+  optionContractSnapshots OptionContractSnapshots[]
+
+  @@index([underlying, snapshotAt(sort: Desc)], map: "option_chain_snapshots_underlying_idx")
+  @@map("option_chain_snapshots")
+}
+
+/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model OptionContractSnapshots {
+  id                   String                @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  chainSnapshotId      String?               @map("chain_snapshot_id") @db.Uuid
+  underlying           String
+  optionType           String?               @map("option_type")
+  strike               Decimal?              @db.Decimal
+  expirationDate       DateTime?             @map("expiration_date") @db.Date
+  bid                  Decimal?              @db.Decimal
+  ask                  Decimal?              @db.Decimal
+  mid                  Decimal?              @db.Decimal
+  last                 Decimal?              @db.Decimal
+  volume               Int?
+  openInterest         Int?                  @map("open_interest")
+  impliedVolatility    Decimal?              @map("implied_volatility") @db.Decimal
+  delta                Decimal?              @db.Decimal
+  gamma                Decimal?              @db.Decimal
+  theta                Decimal?              @db.Decimal
+  vega                 Decimal?              @db.Decimal
+  snapshotAt           DateTime              @default(now()) @map("snapshot_at") @db.Timestamptz(6)
+  optionChainSnapshots OptionChainSnapshots? @relation(fields: [chainSnapshotId], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@index([underlying], map: "option_contract_underlying_idx")
+  @@map("option_contract_snapshots")
+}
+
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model PasswordResetTokens {
+  id        String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId    String    @map("user_id") @db.Uuid
+  tokenHash String    @unique @map("token_hash")
+  expiresAt DateTime  @map("expires_at") @db.Timestamptz(6)
+  usedAt    DateTime? @map("used_at") @db.Timestamptz(6)
+  createdAt DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  appUsers  AppUsers  @relation(fields: [userId], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@index([tokenHash], map: "password_reset_tokens_hash_idx")
+  @@map("password_reset_tokens")
+}
+
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model PostSnapshots {
+  id           String       @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  redditPostId String?      @map("reddit_post_id")
+  snapshotAt   DateTime     @default(now()) @map("snapshot_at") @db.Timestamptz(6)
+  score        Int?
+  numComments  Int?         @map("num_comments")
+  metadata     Json         @default("{}")
+  redditPosts  RedditPosts? @relation(fields: [redditPostId], references: [redditPostId], onDelete: Cascade, onUpdate: NoAction)
+
+  @@map("post_snapshots")
+}
+
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model PumpCoordinationScores {
+  id                     String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  ticker                 String?
+  bucketStart            DateTime? @map("bucket_start") @db.Timestamptz(6)
+  score                  Decimal?  @db.Decimal
+  severity               String?
+  repeatedPhrases        Json      @default("[]") @map("repeated_phrases")
+  authorConcentration    Decimal?  @map("author_concentration") @db.Decimal
+  newAccountRatio        Decimal?  @map("new_account_ratio") @db.Decimal
+  crossSubredditActivity Json      @default("{}") @map("cross_subreddit_activity")
+  deletionRate           Decimal?  @map("deletion_rate") @db.Decimal
+  explanation            String?
+  createdAt              DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  tickers                Tickers?  @relation(fields: [ticker], references: [ticker], onDelete: NoAction, onUpdate: NoAction)
+
+  @@unique([ticker, bucketStart], map: "pump_coordination_scores_uniq")
+  @@index([ticker], map: "pump_scores_ticker_idx")
+  @@map("pump_coordination_scores")
+}
+
+/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model RedditAccounts {
+  id                       String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId                   String    @map("user_id") @db.Uuid
+  redditUsername           String    @map("reddit_username")
+  redditUsernameNormalized String    @unique @map("reddit_username_normalized")
+  redditUserId             String?   @unique @map("reddit_user_id")
+  verificationMethod       String    @map("verification_method")
+  verificationStatus       String    @default("pending") @map("verification_status")
+  verifiedAt               DateTime? @map("verified_at") @db.Timestamptz(6)
+  createdAt                DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt                DateTime  @default(now()) @map("updated_at") @db.Timestamptz(6)
+  appUsers                 AppUsers  @relation(fields: [userId], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@index([userId], map: "reddit_accounts_user_idx")
+  @@index([redditUsernameNormalized], map: "reddit_accounts_username_norm_idx")
+  @@map("reddit_accounts")
+}
+
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model RedditAttachments {
+  id              String       @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  redditPostId    String?      @map("reddit_post_id")
+  redditCommentId String?      @map("reddit_comment_id")
+  attachmentType  String       @default("image") @map("attachment_type")
+  url             String?
+  ocrStatus       String       @default("pending") @map("ocr_status")
+  ocrText         String?      @map("ocr_text")
+  metadata        Json         @default("{}")
+  createdAt       DateTime     @default(now()) @map("created_at") @db.Timestamptz(6)
+  redditPosts     RedditPosts? @relation(fields: [redditPostId], references: [redditPostId], onDelete: Cascade, onUpdate: NoAction)
+
+  @@map("reddit_attachments")
+}
+
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model RedditComments {
+  redditCommentId String       @id @map("reddit_comment_id")
+  redditPostId    String?      @map("reddit_post_id")
+  subreddit       String
+  authorHash      String       @map("author_hash")
+  bodyExcerpt     String?      @map("body_excerpt")
+  score           Int          @default(0)
+  redditCreatedAt DateTime?    @map("reddit_created_at") @db.Timestamptz(6)
+  createdAt       DateTime     @default(now()) @map("created_at") @db.Timestamptz(6)
+  redditPosts     RedditPosts? @relation(fields: [redditPostId], references: [redditPostId], onDelete: Cascade, onUpdate: NoAction)
+
+  @@index([authorHash], map: "reddit_comments_author_idx")
+  @@index([redditPostId], map: "reddit_comments_post_idx")
+  @@map("reddit_comments")
+}
+
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model RedditPosts {
+  redditPostId       String               @id @map("reddit_post_id")
+  subreddit          String
+  title              String
+  bodyExcerpt        String?              @map("body_excerpt")
+  authorHash         String               @map("author_hash")
+  score              Int                  @default(0)
+  numComments        Int                  @default(0) @map("num_comments")
+  permalink          String?
+  redditCreatedAt    DateTime?            @map("reddit_created_at") @db.Timestamptz(6)
+  createdAt          DateTime             @default(now()) @map("created_at") @db.Timestamptz(6)
+  bets               Bets[]
+  ddQualityScores    DdQualityScores?
+  postSnapshots      PostSnapshots[]
+  redditAttachments  RedditAttachments[]
+  redditComments     RedditComments[]
+  tickerMentions     TickerMentions[]
+  tickerStanceEvents TickerStanceEvents[]
+
+  @@map("reddit_posts")
+}
+
+/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model RedditVerificationRequests {
+  id                       String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId                   String    @map("user_id") @db.Uuid
+  redditUsername           String    @map("reddit_username")
+  redditUsernameNormalized String    @map("reddit_username_normalized")
+  verificationCode         String    @map("verification_code")
+  status                   String    @default("pending")
+  expiresAt                DateTime  @map("expires_at") @db.Timestamptz(6)
+  verifiedAt               DateTime? @map("verified_at") @db.Timestamptz(6)
+  rejectedAt               DateTime? @map("rejected_at") @db.Timestamptz(6)
+  adminNotes               String?   @map("admin_notes")
+  createdAt                DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt                DateTime  @default(now()) @map("updated_at") @db.Timestamptz(6)
+  appUsers                 AppUsers  @relation(fields: [userId], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@index([verificationCode], map: "reddit_verif_requests_code_idx")
+  @@index([status], map: "reddit_verif_requests_status_idx")
+  @@index([userId], map: "reddit_verif_requests_user_idx")
+  @@map("reddit_verification_requests")
+}
+
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model ResearchReports {
+  id         String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  slug       String?  @unique
+  title      String
+  summary    String?
+  body       String?
+  reportType String?  @map("report_type")
+  tickers    Json     @default("[]")
+  metadata   Json     @default("{}")
+  createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  @@map("research_reports")
+}
+
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model Session {
+  sid    String   @id @db.VarChar
+  sess   Json     @db.Json
+  expire DateTime @db.Timestamp(6)
+
+  @@index([expire], map: "IDX_session_expire")
+  @@map("session")
+}
+
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model ShortInterestSnapshots {
+  id                String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  ticker            String
+  snapshotAt        DateTime @default(now()) @map("snapshot_at") @db.Timestamptz(6)
+  shortInterest     Decimal? @map("short_interest") @db.Decimal
+  shortPercentFloat Decimal? @map("short_percent_float") @db.Decimal
+  daysToCover       Decimal? @map("days_to_cover") @db.Decimal
+  borrowFee         Decimal? @map("borrow_fee") @db.Decimal
+  squeezeRiskScore  Decimal? @map("squeeze_risk_score") @db.Decimal
+  source            String   @default("stub")
+  metadata          Json     @default("{}")
+
+  @@map("short_interest_snapshots")
+}
+
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model SignalScores {
+  id          String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  ticker      String?
+  bucketStart DateTime? @map("bucket_start") @db.Timestamptz(6)
+  signalType  String    @map("signal_type")
+  score       Decimal?  @db.Decimal
+  confidence  Decimal?  @db.Decimal
+  explanation String?
+  evidence    Json      @default("{}")
+  createdAt   DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  tickers     Tickers?  @relation(fields: [ticker], references: [ticker], onDelete: NoAction, onUpdate: NoAction)
+
+  @@unique([ticker, bucketStart, signalType], map: "signal_scores_uniq")
+  @@index([ticker])
+  @@index([signalType], map: "signal_scores_type_idx")
+  @@map("signal_scores")
+}
+
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model SocialComments {
+  id             String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  externalId     String    @unique @map("external_id")
+  provider       String?
+  source         String?
+  subreddit      String?
+  postExternalId String?   @map("post_external_id")
+  body           String?
+  url            String?
+  authorHash     String?   @map("author_hash")
+  score          Int?
+  tickers        String[]
+  sentiment      String?
+  stance         String?
+  confidence     Decimal?  @db.Decimal
+  postedAt       DateTime? @map("posted_at") @db.Timestamptz(6)
+  fetchedAt      DateTime  @default(now()) @map("fetched_at") @db.Timestamptz(6)
+
+  @@index([subreddit, postedAt(sort: Desc)], map: "social_comments_subreddit_idx")
+  @@index([tickers], map: "social_comments_tickers_gin", type: Gin)
+  @@map("social_comments")
+}
+
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model SocialPosts {
+  id           String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  externalId   String    @unique @map("external_id")
+  provider     String?
+  source       String?
+  subreddit    String?
+  type         String?
+  title        String?
+  body         String?
+  url          String?
+  authorHash   String?   @map("author_hash")
+  score        Int?
+  commentCount Int?      @map("comment_count")
+  tickers      String[]
+  sentiment    String?
+  stance       String?
+  confidence   Decimal?  @db.Decimal
+  isScreenshot Boolean   @default(false) @map("is_screenshot")
+  postedAt     DateTime? @map("posted_at") @db.Timestamptz(6)
+  fetchedAt    DateTime  @default(now()) @map("fetched_at") @db.Timestamptz(6)
+
+  @@index([postedAt(sort: Desc)], map: "social_posts_posted_idx")
+  @@index([subreddit, postedAt(sort: Desc)], map: "social_posts_subreddit_idx")
+  @@index([tickers], map: "social_posts_tickers_gin", type: Gin)
+  @@map("social_posts")
+}
+
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model SubredditPulseSnapshots {
+  id            String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  timeframe     String
+  subreddit     String
+  activityScore Decimal? @map("activity_score") @db.Decimal
+  mentions      Int?
+  changePct     Decimal? @map("change_pct") @db.Decimal
+  mood          String?
+  topTickers    String[] @map("top_tickers")
+  sentiment     String?
+  stance        String?
+  provider      String?
+  source        String?
+  isMock        Boolean  @default(false) @map("is_mock")
+  warning       String?
+  snapshotAt    DateTime @map("snapshot_at") @db.Timestamptz(6)
+  createdAt     DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  @@index([timeframe, snapshotAt(sort: Desc)], map: "subreddit_pulse_snapshots_tf_idx")
+  @@map("subreddit_pulse_snapshots")
+}
+
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model SubredditTickerMetrics1h {
+  ticker         String
+  subreddit      String
+  bucketStart    DateTime @map("bucket_start") @db.Timestamptz(6)
+  mentions       Int      @default(0)
+  bullish        Int      @default(0)
+  bearish        Int      @default(0)
+  neutral        Int      @default(0)
+  sentimentScore Decimal  @default(0) @map("sentiment_score") @db.Decimal(5, 4)
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  tickers        Tickers  @relation(fields: [ticker], references: [ticker], onDelete: NoAction, onUpdate: NoAction)
+
+  @@id([ticker, subreddit, bucketStart])
+  @@map("subreddit_ticker_metrics_1h")
+}
+
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model SubredditTickerMetrics5m {
+  ticker         String
+  subreddit      String
+  bucketStart    DateTime @map("bucket_start") @db.Timestamptz(6)
+  mentions       Int      @default(0)
+  bullish        Int      @default(0)
+  bearish        Int      @default(0)
+  neutral        Int      @default(0)
+  sentimentScore Decimal  @default(0) @map("sentiment_score") @db.Decimal(5, 4)
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  tickers        Tickers  @relation(fields: [ticker], references: [ticker], onDelete: NoAction, onUpdate: NoAction)
+
+  @@id([ticker, subreddit, bucketStart])
+  @@index([subreddit], map: "sub_metrics_5m_sub_idx")
+  @@map("subreddit_ticker_metrics_5m")
+}
+
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model TickerAlerts {
+  id              String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  ticker          String
+  alertType       String   @map("alert_type")
+  severity        String
+  explanation     String?
+  metricsSnapshot Json     @default("{}") @map("metrics_snapshot")
+  evidence        Json     @default("{}")
+  createdAt       DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  tickers         Tickers  @relation(fields: [ticker], references: [ticker], onDelete: NoAction, onUpdate: NoAction)
+
+  @@index([createdAt], map: "ticker_alerts_created_idx")
+  @@index([ticker])
+  @@map("ticker_alerts")
+}
+
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model TickerDailyMetrics {
+  ticker         String
+  day            DateTime @db.Date
+  mentions       Int      @default(0)
+  uniqueAuthors  Int      @default(0) @map("unique_authors")
+  bullish        Int      @default(0)
+  bearish        Int      @default(0)
+  neutral        Int      @default(0)
+  sentimentScore Decimal  @default(0) @map("sentiment_score") @db.Decimal(5, 4)
+  mentionShare   Decimal  @default(0) @map("mention_share") @db.Decimal(5, 4)
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  tickers        Tickers  @relation(fields: [ticker], references: [ticker], onDelete: NoAction, onUpdate: NoAction)
+
+  @@id([ticker, day])
+  @@index([day])
+  @@map("ticker_daily_metrics")
+}
+
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model TickerMentions {
+  id                BigInt      @id @default(autoincrement())
+  ticker            String
+  redditPostId      String      @map("reddit_post_id")
+  pumpLanguageScore Decimal     @default(0) @map("pump_language_score") @db.Decimal(5, 4)
+  narrativeType     String?     @map("narrative_type")
+  createdAt         DateTime    @default(now()) @map("created_at") @db.Timestamptz(6)
+  redditPosts       RedditPosts @relation(fields: [redditPostId], references: [redditPostId], onDelete: NoAction, onUpdate: NoAction)
+  tickers           Tickers     @relation(fields: [ticker], references: [ticker], onDelete: NoAction, onUpdate: NoAction)
+
+  @@unique([ticker, redditPostId], map: "ticker_mentions_ticker_post_uniq")
+  @@index([createdAt], map: "ticker_mentions_created_idx")
+  @@index([ticker])
+  @@map("ticker_mentions")
+}
+
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model TickerMetrics5m {
+  ticker            String
+  bucketStart       DateTime @map("bucket_start") @db.Timestamptz(6)
+  mentions          Int      @default(0)
+  postsCount        Int      @default(0) @map("posts_count")
+  uniqueAuthors     Int      @default(0) @map("unique_authors")
+  avgScore          Decimal  @default(0) @map("avg_score") @db.Decimal(10, 2)
+  totalComments     Int      @default(0) @map("total_comments")
+  mentionVelocity   Decimal  @default(0) @map("mention_velocity") @db.Decimal(10, 2)
+  abnormalityScore  Decimal  @default(0) @map("abnormality_score") @db.Decimal(10, 2)
+  sentimentScore    Decimal  @default(0) @map("sentiment_score") @db.Decimal(5, 4)
+  pumpLanguageScore Decimal  @default(0) @map("pump_language_score") @db.Decimal(5, 4)
+  createdAt         DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  tickers           Tickers  @relation(fields: [ticker], references: [ticker], onDelete: NoAction, onUpdate: NoAction)
+
+  @@id([ticker, bucketStart])
+  @@index([bucketStart], map: "ticker_metrics_5m_bucket_idx")
+  @@map("ticker_metrics_5m")
+}
+
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model TickerPositioningIndexes {
+  id                       String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  ticker                   String?
+  bucketStart              DateTime? @map("bucket_start") @db.Timestamptz(6)
+  callConviction           Decimal?  @map("call_conviction") @db.Decimal
+  putConviction            Decimal?  @map("put_conviction") @db.Decimal
+  netDirectionalConviction Decimal?  @map("net_directional_conviction") @db.Decimal
+  declaredYoloCapital      Decimal?  @map("declared_yolo_capital") @db.Decimal
+  verifiedYoloCapital      Decimal?  @map("verified_yolo_capital") @db.Decimal
+  averageDte               Decimal?  @map("average_dte") @db.Decimal
+  averageMoneyness         Decimal?  @map("average_moneyness") @db.Decimal
+  premiumAtRisk            Decimal?  @map("premium_at_risk") @db.Decimal
+  leveragedSentiment       Decimal?  @map("leveraged_sentiment") @db.Decimal
+  expirationWall           Json      @default("{}") @map("expiration_wall")
+  createdAt                DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  tickers                  Tickers?  @relation(fields: [ticker], references: [ticker], onDelete: NoAction, onUpdate: NoAction)
+
+  @@unique([ticker, bucketStart], map: "ticker_positioning_indexes_uniq")
+  @@index([ticker], map: "positioning_ticker_idx")
+  @@map("ticker_positioning_indexes")
+}
+
+/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model TickerStanceEvents {
+  id              String       @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  ticker          String
+  redditPostId    String?      @map("reddit_post_id")
+  redditCommentId String?      @map("reddit_comment_id")
+  authorHash      String?      @map("author_hash")
+  subreddit       String?
+  stance          String
+  confidence      Decimal      @default(0) @db.Decimal(5, 4)
+  matchedTerms    Json         @default("[]") @map("matched_terms")
+  createdAt       DateTime     @default(now()) @map("created_at") @db.Timestamptz(6)
+  redditPosts     RedditPosts? @relation(fields: [redditPostId], references: [redditPostId], onUpdate: NoAction)
+  tickers         Tickers      @relation(fields: [ticker], references: [ticker], onDelete: NoAction, onUpdate: NoAction)
+
+  @@index([createdAt], map: "stance_events_created_idx")
+  @@index([ticker], map: "stance_events_ticker_idx")
+  @@map("ticker_stance_events")
+}
+
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model TickerTrendClassifications {
+  id             String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  ticker         String
+  bucketStart    DateTime @map("bucket_start") @db.Timestamptz(6)
+  classification String
+  score          Decimal  @default(0) @db.Decimal(10, 4)
+  rank           Int?
+  evidence       Json     @default("{}")
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  tickers        Tickers  @relation(fields: [ticker], references: [ticker], onDelete: NoAction, onUpdate: NoAction)
+
+  @@unique([ticker, bucketStart, classification], map: "ticker_trend_class_uniq")
+  @@map("ticker_trend_classifications")
+}
+
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model Tickers {
+  ticker                     String                       @id
+  companyName                String?                      @map("company_name")
+  exchange                   String?
+  isActive                   Boolean?                     @default(true) @map("is_active")
+  isCommonWord               Boolean?                     @default(false) @map("is_common_word")
+  createdAt                  DateTime                     @default(now()) @map("created_at") @db.Timestamptz(6)
+  betaAdjustedResults        BetaAdjustedResults[]
+  bets                       Bets[]
+  ddQualityScores            DdQualityScores[]
+  narrativeEvents            NarrativeEvents[]
+  narrativeTransitions       NarrativeTransitions[]
+  pumpCoordinationScores     PumpCoordinationScores[]
+  signalScores               SignalScores[]
+  subredditTickerMetrics1h   SubredditTickerMetrics1h[]
+  subredditTickerMetrics5m   SubredditTickerMetrics5m[]
+  tickerAlerts               TickerAlerts[]
+  tickerDailyMetrics         TickerDailyMetrics[]
+  tickerMentions             TickerMentions[]
+  tickerMetrics5m            TickerMetrics5m[]
+  tickerPositioningIndexes   TickerPositioningIndexes[]
+  tickerStanceEvents         TickerStanceEvents[]
+  tickerTrendClassifications TickerTrendClassifications[]
+  virtualPositions           VirtualPositions[]
+  virtualTrades              VirtualTrades[]
+
+  @@map("tickers")
+}
+
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model TrendingTickerSnapshots {
+  id             String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  timeframe      String
+  symbol         String
+  mentionCount   Int?     @map("mention_count")
+  sentiment      String?
+  stance         String?
+  price          Decimal? @db.Decimal
+  changePct      Decimal? @map("change_pct") @db.Decimal
+  providerSocial String?  @map("provider_social")
+  providerMarket String?  @map("provider_market")
+  isMock         Boolean  @default(false) @map("is_mock")
+  snapshotAt     DateTime @map("snapshot_at") @db.Timestamptz(6)
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  @@index([symbol, snapshotAt(sort: Desc)], map: "trending_ticker_snapshots_symbol_idx")
+  @@index([timeframe, snapshotAt(sort: Desc)], map: "trending_ticker_snapshots_tf_idx")
+  @@map("trending_ticker_snapshots")
+}
+
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model UserAlertDeliveries {
+  id             String          @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  alertRuleId    String?         @map("alert_rule_id") @db.Uuid
+  userId         String?         @map("user_id")
+  ticker         String?
+  channel        String          @default("in_app")
+  payload        Json            @default("{}")
+  deliveredAt    DateTime        @default(now()) @map("delivered_at") @db.Timestamptz(6)
+  userAlertRules UserAlertRules? @relation(fields: [alertRuleId], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@map("user_alert_deliveries")
+}
+
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model UserAlertRules {
+  id                  String                @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId              String                @map("user_id")
+  name                String?
+  ruleType            String                @map("rule_type")
+  ticker              String?
+  params              Json                  @default("{}")
+  isActive            Boolean               @default(true) @map("is_active")
+  createdAt           DateTime              @default(now()) @map("created_at") @db.Timestamptz(6)
+  alertType           String?               @map("alert_type")
+  condition           Json                  @default("{}")
+  deliveryChannels    Json                  @default("[]") @map("delivery_channels")
+  userAlertDeliveries UserAlertDeliveries[]
+
+  @@map("user_alert_rules")
+}
+
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model UserNotifications {
+  id        String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId    String    @map("user_id") @db.Uuid
+  title     String
+  body      String?
+  metadata  Json      @default("{}")
+  readAt    DateTime? @map("read_at") @db.Timestamptz(6)
+  createdAt DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  appUsers  AppUsers  @relation(fields: [userId], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@index([userId], map: "user_notifications_user_idx")
+  @@map("user_notifications")
+}
+
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model UserPortfolioPositions {
+  id         String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId     String    @map("user_id")
+  ticker     String
+  quantity   Decimal?  @db.Decimal
+  avgCost    Decimal?  @map("avg_cost") @db.Decimal
+  instrument String    @default("stock")
+  openedAt   DateTime? @map("opened_at") @db.Timestamptz(6)
+  metadata   Json      @default("{}")
+  createdAt  DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  @@index([userId], map: "portfolio_user_idx")
+  @@map("user_portfolio_positions")
+}
+
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model UserSessions {
+  id               String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId           String   @map("user_id") @db.Uuid
+  sessionTokenHash String   @unique @map("session_token_hash")
+  expiresAt        DateTime @map("expires_at") @db.Timestamptz(6)
+  createdAt        DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  appUsers         AppUsers @relation(fields: [userId], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@index([sessionTokenHash], map: "user_sessions_token_hash_idx")
+  @@index([userId], map: "user_sessions_user_idx")
+  @@map("user_sessions")
+}
+
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model UserWatchlistItems {
+  id             String          @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  watchlistId    String?         @map("watchlist_id") @db.Uuid
+  ticker         String
+  createdAt      DateTime        @default(now()) @map("created_at") @db.Timestamptz(6)
+  userWatchlists UserWatchlists? @relation(fields: [watchlistId], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@unique([watchlistId, ticker], map: "user_watchlist_items_uniq")
+  @@index([ticker], map: "watchlist_items_ticker_idx")
+  @@map("user_watchlist_items")
+}
+
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model UserWatchlists {
+  id                 String               @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId             String               @map("user_id")
+  name               String               @default("My Watchlist")
+  createdAt          DateTime             @default(now()) @map("created_at") @db.Timestamptz(6)
+  userWatchlistItems UserWatchlistItems[]
+
+  @@unique([userId, name], map: "user_watchlists_uniq")
+  @@map("user_watchlists")
+}
+
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+/// Legacy Reddit-OAuth identity, kept for the optional/future Reddit login.
+/// The PRIMARY account record for email + password auth is AppUsers; personal
+/// tables key off that, never off this one.
+///
+/// `id` and `updatedAt` are generated by Prisma, not by PostgreSQL: the column
+/// has no database default and there is no updated_at trigger, so removing
+/// these would silently break inserts and stop updated_at from moving.
+model Users {
+  id                     String    @id @default(cuid())
   redditId               String    @unique @map("reddit_id")
   redditUsername         String    @map("reddit_username")
   redditAvatarUrl        String?   @map("reddit_avatar_url")
-  redditCreatedAt        DateTime? @map("reddit_created_at")
+  redditCreatedAt        DateTime? @map("reddit_created_at") @db.Timestamptz(6)
   redditHasVerifiedEmail Boolean   @default(false) @map("reddit_has_verified_email")
-
-  // Optional email, added and verified later (not required for login — Reddit
-  // OAuth does not expose the user's email address).
-  email         String?  @unique
-  emailVerified Boolean  @default(false) @map("email_verified")
-
-  createdAt DateTime @default(now()) @map("created_at")
-  updatedAt DateTime @updatedAt @map("updated_at")
+  email                  String?   @unique
+  emailVerified          Boolean   @default(false) @map("email_verified")
+  createdAt              DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt              DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
 
   @@map("users")
+}
+
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model VirtualAccounts {
+  id                      String                    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId                  String                    @unique(map: "virtual_accounts_user_uniq") @map("user_id") @db.Uuid
+  startingCash            Decimal                   @default(100000) @map("starting_cash") @db.Decimal
+  cashBalance             Decimal                   @default(100000) @map("cash_balance") @db.Decimal
+  equityValue             Decimal                   @default(100000) @map("equity_value") @db.Decimal
+  currency                String?                   @default("USD")
+  createdAt               DateTime                  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt               DateTime                  @default(now()) @map("updated_at") @db.Timestamptz(6)
+  competitionParticipants CompetitionParticipants[]
+  appUsers                AppUsers                  @relation(fields: [userId], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  virtualPositions        VirtualPositions[]
+  virtualTrades           VirtualTrades[]
+
+  @@index([userId], map: "virtual_accounts_user_idx")
+  @@map("virtual_accounts")
+}
+
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model VirtualPositions {
+  id               String           @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId           String           @map("user_id") @db.Uuid
+  virtualAccountId String?          @map("virtual_account_id") @db.Uuid
+  ticker           String?
+  instrument       String?
+  optionType       String?          @map("option_type")
+  strike           Decimal?         @db.Decimal
+  expirationDate   DateTime?        @map("expiration_date") @db.Date
+  quantity         Decimal          @db.Decimal
+  avgCost          Decimal          @map("avg_cost") @db.Decimal
+  marketValue      Decimal?         @default(0) @map("market_value") @db.Decimal
+  unrealizedPl     Decimal?         @default(0) @map("unrealized_pl") @db.Decimal
+  updatedAt        DateTime         @default(now()) @map("updated_at") @db.Timestamptz(6)
+  tickers          Tickers?         @relation(fields: [ticker], references: [ticker], onDelete: NoAction, onUpdate: NoAction)
+  appUsers         AppUsers         @relation(fields: [userId], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  virtualAccounts  VirtualAccounts? @relation(fields: [virtualAccountId], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@unique([virtualAccountId, ticker, instrument, optionType, strike, expirationDate], map: "virtual_positions_uniq")
+  @@index([virtualAccountId], map: "virtual_positions_account_idx")
+  @@map("virtual_positions")
+}
+
+/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model VirtualTrades {
+  id               String           @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId           String           @map("user_id") @db.Uuid
+  virtualAccountId String?          @map("virtual_account_id") @db.Uuid
+  ticker           String?
+  side             String?
+  instrument       String?
+  optionType       String?          @map("option_type")
+  strike           Decimal?         @db.Decimal
+  expirationDate   DateTime?        @map("expiration_date") @db.Date
+  quantity         Decimal          @db.Decimal
+  price            Decimal          @db.Decimal
+  notionalValue    Decimal          @map("notional_value") @db.Decimal
+  fees             Decimal?         @default(0) @db.Decimal
+  status           String?          @default("filled")
+  createdAt        DateTime         @default(now()) @map("created_at") @db.Timestamptz(6)
+  tickers          Tickers?         @relation(fields: [ticker], references: [ticker], onDelete: NoAction, onUpdate: NoAction)
+  appUsers         AppUsers         @relation(fields: [userId], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  virtualAccounts  VirtualAccounts? @relation(fields: [virtualAccountId], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@index([virtualAccountId], map: "virtual_trades_account_idx")
+  @@index([userId], map: "virtual_trades_user_idx")
+  @@map("virtual_trades")
+}
+
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model WebhookSubscriptions {
+  id         String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId     String   @map("user_id")
+  targetUrl  String   @map("target_url")
+  eventTypes Json     @default("[]") @map("event_types")
+  secret     String?
+  isActive   Boolean  @default(true) @map("is_active")
+  createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  @@map("webhook_subscriptions")
+}
+
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model WorkerRuns {
+  id           String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  workerName   String?   @map("worker_name")
+  jobName      String    @map("job_name")
+  status       String
+  startedAt    DateTime? @map("started_at") @db.Timestamptz(6)
+  finishedAt   DateTime? @map("finished_at") @db.Timestamptz(6)
+  durationMs   Int?      @map("duration_ms")
+  errorMessage String?   @map("error_message")
+  metadata     Json?
+  createdAt    DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  @@index([jobName, createdAt(sort: Desc)], map: "worker_runs_job_idx")
+  @@index([status, createdAt(sort: Desc)], map: "worker_runs_status_idx")
+  @@map("worker_runs")
 }

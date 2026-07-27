@@ -1,5 +1,6 @@
 import { randomInt } from "node:crypto";
-import { query, queryOne } from "../../lib/db.js";
+
+import { prisma } from "../../lib/prisma.js";
 import { env } from "../../config/env.js";
 
 /**
@@ -15,7 +16,10 @@ import { env } from "../../config/env.js";
  */
 
 const CODE_TTL_MS = 30 * 60 * 1000; // 30 minutes
+const ONE_HOUR_MS = 60 * 60 * 1000;
 const MAX_REQUESTS_PER_HOUR = 3;
+/** Requests a user can still act on — the states "not yet resolved". */
+const ACTIVE_STATUSES = ["pending", "user_claimed_sent"];
 // Unambiguous uppercase alphabet (no O/0/I/1) for the human-typed code.
 const CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 
@@ -65,24 +69,25 @@ function buildInstructions(): string {
   );
 }
 
-interface RequestRow {
-  id: string;
-  reddit_username: string;
-  verification_code: string;
-  status: string;
-  expires_at: Date;
-  created_at: Date;
-}
-
-function toRequest(row: RequestRow): RedditVerificationRequest {
-  return {
-    id: row.id,
-    redditUsername: row.reddit_username,
-    code: row.verification_code,
-    status: row.status,
-    expiresAt: new Date(row.expires_at).toISOString(),
-    createdAt: new Date(row.created_at).toISOString(),
-  };
+/**
+ * Throw when this Reddit username is already verified by a DIFFERENT app user.
+ * A verified link is exclusive: two accounts can never claim one username.
+ */
+async function assertUsernameNotTaken(
+  normalized: string,
+  userId: string,
+): Promise<void> {
+  const takenByOther = await prisma.redditAccounts.findFirst({
+    where: {
+      redditUsernameNormalized: normalized,
+      verificationStatus: "verified",
+      userId: { not: userId },
+    },
+    select: { id: true },
+  });
+  if (takenByOther) {
+    throw new Error("This Reddit username is already verified by another account.");
+  }
 }
 
 /**
@@ -105,50 +110,44 @@ export async function startRedditVerification(
   }
 
   // A username already verified by a different account cannot be re-claimed.
-  const takenByOther = await queryOne<{ id: string }>(
-    `SELECT id FROM public.reddit_accounts
-      WHERE reddit_username_normalized = $1
-        AND verification_status = 'verified'
-        AND user_id <> $2`,
-    [normalized, userId],
-  );
-  if (takenByOther) {
-    throw new Error("This Reddit username is already verified by another account.");
-  }
+  await assertUsernameNotTaken(normalized, userId);
 
   // Rate limit: at most MAX_REQUESTS_PER_HOUR in the trailing hour.
-  const recent = await queryOne<{ count: string }>(
-    `SELECT COUNT(*)::text AS count
-       FROM public.reddit_verification_requests
-      WHERE user_id = $1 AND created_at > now() - interval '1 hour'`,
-    [userId],
-  );
-  if (recent && Number(recent.count) >= MAX_REQUESTS_PER_HOUR) {
+  const recent = await prisma.redditVerificationRequests.count({
+    where: { userId, createdAt: { gt: new Date(Date.now() - ONE_HOUR_MS) } },
+  });
+  if (recent >= MAX_REQUESTS_PER_HOUR) {
     throw new Error(
       "Too many verification attempts. Please wait a while and try again.",
     );
   }
 
-  // Retire any still-active request so there is only one live request per user.
-  await query(
-    `UPDATE public.reddit_verification_requests
-        SET status = 'expired', updated_at = now()
-      WHERE user_id = $1 AND status IN ('pending', 'user_claimed_sent')`,
-    [userId],
-  );
-
   const code = generateCode();
   const expiresAt = new Date(Date.now() + CODE_TTL_MS);
-  const inserted = await queryOne<{ id: string }>(
-    `INSERT INTO public.reddit_verification_requests
-       (user_id, reddit_username, reddit_username_normalized, verification_code, status, expires_at)
-     VALUES ($1, $2, $3, $4, 'pending', $5)
-     RETURNING id`,
-    [userId, redditUsername.trim(), normalized, code, expiresAt],
-  );
+
+  // Retiring the old request and issuing the new one must happen together, or a
+  // failure between them leaves the user with two live codes (or none).
+  const inserted = await prisma.$transaction(async (tx) => {
+    await tx.redditVerificationRequests.updateMany({
+      where: { userId, status: { in: ACTIVE_STATUSES } },
+      data: { status: "expired", updatedAt: new Date() },
+    });
+
+    return tx.redditVerificationRequests.create({
+      data: {
+        userId,
+        redditUsername: redditUsername.trim(),
+        redditUsernameNormalized: normalized,
+        verificationCode: code,
+        status: "pending",
+        expiresAt,
+      },
+      select: { id: true },
+    });
+  });
 
   return {
-    requestId: inserted!.id,
+    requestId: inserted.id,
     code,
     expiresAt: expiresAt.toISOString(),
     instructions: buildInstructions(),
@@ -163,18 +162,45 @@ export async function markRedditVerificationSent(
   userId: string,
   requestId: string,
 ): Promise<void> {
-  const rows = await query(
-    `UPDATE public.reddit_verification_requests
-        SET status = 'user_claimed_sent', updated_at = now()
-      WHERE id = $1 AND user_id = $2
-        AND status IN ('pending', 'user_claimed_sent')
-        AND expires_at > now()
-      RETURNING id`,
-    [requestId, userId],
-  );
-  if (rows.length === 0) {
+  const { count } = await prisma.redditVerificationRequests.updateMany({
+    where: {
+      id: requestId,
+      userId,
+      status: { in: ACTIVE_STATUSES },
+      expiresAt: { gt: new Date() },
+    },
+    data: { status: "user_claimed_sent", updatedAt: new Date() },
+  });
+  if (count === 0) {
     throw new Error("Verification request not found or expired.");
   }
+}
+
+/**
+ * The user's best linked Reddit account: a verified link wins over a pending
+ * one, then most recently updated. Two ordered lookups because Prisma cannot
+ * sort on a computed boolean.
+ */
+async function findBestRedditAccount(userId: string) {
+  const select = {
+    redditUsername: true,
+    verificationStatus: true,
+    verificationMethod: true,
+    verifiedAt: true,
+  } as const;
+
+  return (
+    (await prisma.redditAccounts.findFirst({
+      where: { userId, verificationStatus: "verified" },
+      select,
+      orderBy: { updatedAt: "desc" },
+    })) ??
+    (await prisma.redditAccounts.findFirst({
+      where: { userId },
+      select,
+      orderBy: { updatedAt: "desc" },
+    }))
+  );
 }
 
 /** Current verification status for a user: latest request + linked account. */
@@ -182,38 +208,39 @@ export async function getRedditVerificationStatus(userId: string): Promise<{
   request: RedditVerificationRequest | null;
   account: RedditAccountSummary | null;
 }> {
-  const requestRow = await queryOne<RequestRow>(
-    `SELECT id, reddit_username, verification_code, status, expires_at, created_at
-       FROM public.reddit_verification_requests
-      WHERE user_id = $1
-      ORDER BY created_at DESC
-      LIMIT 1`,
-    [userId],
-  );
+  const requestRow = await prisma.redditVerificationRequests.findFirst({
+    where: { userId },
+    select: {
+      id: true,
+      redditUsername: true,
+      verificationCode: true,
+      status: true,
+      expiresAt: true,
+      createdAt: true,
+    },
+    orderBy: { createdAt: "desc" },
+  });
 
-  const accountRow = await queryOne<{
-    reddit_username: string;
-    verification_status: string;
-    verification_method: string;
-    verified_at: Date | null;
-  }>(
-    `SELECT reddit_username, verification_status, verification_method, verified_at
-       FROM public.reddit_accounts
-      WHERE user_id = $1
-      ORDER BY (verification_status = 'verified') DESC, updated_at DESC
-      LIMIT 1`,
-    [userId],
-  );
+  const accountRow = await findBestRedditAccount(userId);
 
   return {
-    request: requestRow ? toRequest(requestRow) : null,
+    request: requestRow
+      ? {
+          id: requestRow.id,
+          redditUsername: requestRow.redditUsername,
+          code: requestRow.verificationCode,
+          status: requestRow.status,
+          expiresAt: requestRow.expiresAt.toISOString(),
+          createdAt: requestRow.createdAt.toISOString(),
+        }
+      : null,
     account: accountRow
       ? {
-          redditUsername: accountRow.reddit_username,
-          verificationStatus: accountRow.verification_status,
-          verificationMethod: accountRow.verification_method,
-          verifiedAt: accountRow.verified_at
-            ? new Date(accountRow.verified_at).toISOString()
+          redditUsername: accountRow.redditUsername,
+          verificationStatus: accountRow.verificationStatus,
+          verificationMethod: accountRow.verificationMethod,
+          verifiedAt: accountRow.verifiedAt
+            ? accountRow.verifiedAt.toISOString()
             : null,
         }
       : null,
@@ -233,33 +260,31 @@ export async function getPendingRedditVerifications(): Promise<
     createdAt: string;
   }>
 > {
-  const rows = await query<{
-    id: string;
-    user_id: string;
-    email: string;
-    reddit_username: string;
-    verification_code: string;
-    status: string;
-    expires_at: Date;
-    created_at: Date;
-  }>(
-    `SELECT r.id, r.user_id, u.email, r.reddit_username, r.verification_code,
-            r.status, r.expires_at, r.created_at
-       FROM public.reddit_verification_requests r
-       JOIN public.app_users u ON u.id = r.user_id
-      WHERE r.status IN ('pending', 'user_claimed_sent')
-      ORDER BY r.created_at ASC`,
-  );
+  const rows = await prisma.redditVerificationRequests.findMany({
+    where: { status: { in: ACTIVE_STATUSES } },
+    select: {
+      id: true,
+      userId: true,
+      redditUsername: true,
+      verificationCode: true,
+      status: true,
+      expiresAt: true,
+      createdAt: true,
+      // The JOIN on app_users, expressed as a relation.
+      appUsers: { select: { email: true } },
+    },
+    orderBy: { createdAt: "asc" },
+  });
 
   return rows.map((r) => ({
     requestId: r.id,
-    userId: r.user_id,
-    email: r.email,
-    redditUsername: r.reddit_username,
-    code: r.verification_code,
+    userId: r.userId,
+    email: r.appUsers.email,
+    redditUsername: r.redditUsername,
+    code: r.verificationCode,
     status: r.status,
-    expiresAt: new Date(r.expires_at).toISOString(),
-    createdAt: new Date(r.created_at).toISOString(),
+    expiresAt: r.expiresAt.toISOString(),
+    createdAt: r.createdAt.toISOString(),
   }));
 }
 
@@ -271,51 +296,54 @@ export async function adminApproveRedditVerification(
   requestId: string,
   adminNotes?: string,
 ): Promise<void> {
-  const request = await queryOne<{
-    user_id: string;
-    reddit_username: string;
-    reddit_username_normalized: string;
-  }>(
-    `SELECT user_id, reddit_username, reddit_username_normalized
-       FROM public.reddit_verification_requests
-      WHERE id = $1`,
-    [requestId],
-  );
+  const request = await prisma.redditVerificationRequests.findUnique({
+    where: { id: requestId },
+    select: {
+      userId: true,
+      redditUsername: true,
+      redditUsernameNormalized: true,
+    },
+  });
   if (!request) {
     throw new Error("Verification request not found.");
   }
 
-  const takenByOther = await queryOne<{ id: string }>(
-    `SELECT id FROM public.reddit_accounts
-      WHERE reddit_username_normalized = $1
-        AND verification_status = 'verified'
-        AND user_id <> $2`,
-    [request.reddit_username_normalized, request.user_id],
-  );
-  if (takenByOther) {
-    throw new Error("This Reddit username is already verified by another account.");
-  }
+  await assertUsernameNotTaken(request.redditUsernameNormalized, request.userId);
 
-  await query(
-    `UPDATE public.reddit_verification_requests
-        SET status = 'verified', verified_at = now(), admin_notes = $2, updated_at = now()
-      WHERE id = $1`,
-    [requestId, adminNotes ?? null],
-  );
+  const now = new Date();
 
-  await query(
-    `INSERT INTO public.reddit_accounts
-       (user_id, reddit_username, reddit_username_normalized, verification_method, verification_status, verified_at)
-     VALUES ($1, $2, $3, 'inbound_dm_manual', 'verified', now())
-     ON CONFLICT (reddit_username_normalized)
-     DO UPDATE SET user_id = EXCLUDED.user_id,
-                   reddit_username = EXCLUDED.reddit_username,
-                   verification_method = 'inbound_dm_manual',
-                   verification_status = 'verified',
-                   verified_at = now(),
-                   updated_at = now()`,
-    [request.user_id, request.reddit_username, request.reddit_username_normalized],
-  );
+  // Approving the request and creating the verified link is one decision: never
+  // leave a request marked verified without the account row that proves it.
+  await prisma.$transaction([
+    prisma.redditVerificationRequests.update({
+      where: { id: requestId },
+      data: {
+        status: "verified",
+        verifiedAt: now,
+        adminNotes: adminNotes ?? null,
+        updatedAt: now,
+      },
+    }),
+    prisma.redditAccounts.upsert({
+      where: { redditUsernameNormalized: request.redditUsernameNormalized },
+      create: {
+        userId: request.userId,
+        redditUsername: request.redditUsername,
+        redditUsernameNormalized: request.redditUsernameNormalized,
+        verificationMethod: "inbound_dm_manual",
+        verificationStatus: "verified",
+        verifiedAt: now,
+      },
+      update: {
+        userId: request.userId,
+        redditUsername: request.redditUsername,
+        verificationMethod: "inbound_dm_manual",
+        verificationStatus: "verified",
+        verifiedAt: now,
+        updatedAt: now,
+      },
+    }),
+  ]);
 }
 
 /** Admin: reject a request. */
@@ -323,25 +351,30 @@ export async function adminRejectRedditVerification(
   requestId: string,
   adminNotes?: string,
 ): Promise<void> {
-  const rows = await query(
-    `UPDATE public.reddit_verification_requests
-        SET status = 'rejected', rejected_at = now(), admin_notes = $2, updated_at = now()
-      WHERE id = $1
-      RETURNING id`,
-    [requestId, adminNotes ?? null],
-  );
-  if (rows.length === 0) {
+  const now = new Date();
+  const { count } = await prisma.redditVerificationRequests.updateMany({
+    where: { id: requestId },
+    data: {
+      status: "rejected",
+      rejectedAt: now,
+      adminNotes: adminNotes ?? null,
+      updatedAt: now,
+    },
+  });
+  if (count === 0) {
     throw new Error("Verification request not found.");
   }
 }
 
 /** Let a user unlink their Reddit account and clear any active requests. */
 export async function unlinkRedditAccount(userId: string): Promise<void> {
-  await query(`DELETE FROM public.reddit_accounts WHERE user_id = $1`, [userId]);
-  await query(
-    `UPDATE public.reddit_verification_requests
-        SET status = 'expired', updated_at = now()
-      WHERE user_id = $1 AND status IN ('pending', 'user_claimed_sent')`,
-    [userId],
-  );
+  const now = new Date();
+
+  await prisma.$transaction([
+    prisma.redditAccounts.deleteMany({ where: { userId } }),
+    prisma.redditVerificationRequests.updateMany({
+      where: { userId, status: { in: ACTIVE_STATUSES } },
+      data: { status: "expired", updatedAt: now },
+    }),
+  ]);
 }

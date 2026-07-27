@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 
 import { env } from "../../../config/env.js";
+import { assertProviderCallsAllowed } from "../../../config/serviceRole.js";
 import { TRACKED_SUBREDDIT_NAMES } from "../subreddits.js";
 import { classifySocialItem } from "../socialClassifier.service.js";
 import { extractTickersFrom } from "../tickerExtractor.service.js";
@@ -173,6 +174,25 @@ export class MindcaseSocialDataProvider implements SocialDataProvider {
     const sweep = await this.fetchManySubreddits(subs, `$${params.ticker}`);
     assertUsable(sweep);
     return assembleTickerFeed(sweep.items, params, this.meta(partialWarning(sweep)));
+  }
+
+  /**
+   * Raw normalized items for the INGESTION WORKER.
+   *
+   * The worker persists these into social_posts/social_comments and computes the
+   * pulse itself, so the aggregation is stored rather than recomputed per
+   * request. Returns partial results plus which subreddits failed — a rate-limited
+   * community never invalidates the ones that answered.
+   */
+  async fetchItems(params: {
+    subreddits?: string[];
+    keyword?: string;
+  }): Promise<SweepResult> {
+    if (!this.configured) throw new MindcaseNotConfiguredError();
+    const subs = params.subreddits?.length
+      ? params.subreddits
+      : [...TRACKED_SUBREDDIT_NAMES];
+    return this.fetchManySubreddits(subs, params.keyword);
   }
 
   private meta(warning?: string): ResponseMeta {
@@ -352,6 +372,9 @@ export class MindcaseSocialDataProvider implements SocialDataProvider {
     path: string,
     body?: unknown,
   ): Promise<T> {
+    // Hard process boundary: only the ingestion worker may reach Mindcase.
+    assertProviderCallsAllowed("Mindcase");
+
     const url = `${this.baseUrl}${path}`;
     const maxRetries = env.MINDCASE_MAX_RETRIES;
     let lastErr: unknown;
@@ -408,7 +431,7 @@ export class MindcaseSocialDataProvider implements SocialDataProvider {
 }
 
 /** Outcome of one bounded sweep across several subreddits. */
-type SweepResult = {
+export type SweepResult = {
   items: SocialPostItem[];
   /** Subreddits whose fetch failed (rate limit, job timeout, network, …). */
   failed: string[];

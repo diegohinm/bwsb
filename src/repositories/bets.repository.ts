@@ -1,5 +1,19 @@
-import { query, queryOne } from "../lib/db.js";
-import type { Bet, BetLeg, BetSnapshot } from "../types/domain.js";
+import type { Prisma, BetLegs, BetSnapshots, Bets } from "@prisma/client";
+
+import { prisma } from "../lib/prisma.js";
+import { num } from "../lib/numeric.js";
+import type {
+  Bet,
+  BetLeg,
+  BetSnapshot,
+  BetStatus,
+  Direction,
+  Instrument,
+  Moneyness,
+  OptionType,
+  PositionIntent,
+  VerificationLevel,
+} from "../types/domain.js";
 import {
   demoBetById,
   demoLegsForBet,
@@ -18,6 +32,16 @@ export interface BetFilters {
 
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** How much a bet has been proven, weakest to strongest. */
+export const VERIFICATION_RANK: Record<string, number> = {
+  unverified: 0,
+  text_only: 1,
+  screenshot_detected: 2,
+  internally_consistent: 3,
+  market_validated: 4,
+  follow_up_verified: 5,
+};
 
 /** True when the caller narrowed the feed (so an empty result is intentional). */
 function hasFilters(f: BetFilters): boolean {
@@ -45,41 +69,127 @@ async function safe<T>(label: string, run: () => Promise<T>, fallback: () => T):
   }
 }
 
+// ── Row mapping ──────────────────────────────────────────────────────────────
+// The domain types (and the demo fallback rows they share the wire with) are
+// snake_case with real numbers and ISO strings, so Decimal/Date columns are
+// converted once here rather than leaking Prisma types into routes.
+
+/** A `date` column carries no time — render it as YYYY-MM-DD, like the demo rows. */
+function dateOnly(value: Date | null): string | null {
+  return value ? value.toISOString().slice(0, 10) : null;
+}
+
+function toBet(r: Bets): Bet {
+  return {
+    id: r.id,
+    source_type: r.sourceType,
+    reddit_post_id: r.redditPostId,
+    reddit_comment_id: r.redditCommentId,
+    author_hash: r.authorHash,
+    ticker: r.ticker,
+    direction: r.direction as Direction | null,
+    instrument: r.instrument as Instrument | null,
+    option_type: r.optionType as OptionType | null,
+    position_intent: r.positionIntent as PositionIntent | null,
+    status: r.status as BetStatus | null,
+    declared_capital: num(r.declaredCapital),
+    verified_capital: num(r.verifiedCapital),
+    notional_exposure: num(r.notionalExposure),
+    max_loss: num(r.maxLoss),
+    max_gain: num(r.maxGain),
+    breakeven: num(r.breakeven),
+    entry_underlying_price: num(r.entryUnderlyingPrice),
+    entry_timestamp: r.entryTimestamp ? r.entryTimestamp.toISOString() : null,
+    extraction_confidence: num(r.extractionConfidence),
+    verification_level: r.verificationLevel as VerificationLevel | null,
+    raw_evidence: r.rawEvidence,
+    created_at: r.createdAt.toISOString(),
+    updated_at: r.updatedAt.toISOString(),
+  };
+}
+
+function toLeg(r: BetLegs): BetLeg {
+  return {
+    id: r.id,
+    bet_id: r.betId ?? "",
+    leg_type: r.legType as BetLeg["leg_type"],
+    side: r.side as BetLeg["side"],
+    option_type: r.optionType as OptionType | null,
+    strike: num(r.strike),
+    expiration_date: dateOnly(r.expirationDate),
+    contracts: r.contracts,
+    shares: num(r.shares),
+    premium: num(r.premium),
+    price: num(r.price),
+    dte: r.dte,
+    moneyness: r.moneyness as Moneyness | null,
+    delta: num(r.delta),
+    theta: num(r.theta),
+    vega: num(r.vega),
+    implied_volatility: num(r.impliedVolatility),
+    bid: num(r.bid),
+    ask: num(r.ask),
+    mid: num(r.mid),
+    created_at: r.createdAt.toISOString(),
+  };
+}
+
+function toSnapshot(r: BetSnapshots): BetSnapshot {
+  return {
+    id: r.id,
+    bet_id: r.betId ?? "",
+    snapshot_at: r.snapshotAt.toISOString(),
+    underlying_price: num(r.underlyingPrice),
+    estimated_option_value: num(r.estimatedOptionValue),
+    estimated_position_value: num(r.estimatedPositionValue),
+    return_pct: num(r.returnPct),
+    unrealized_pl: num(r.unrealizedPl),
+    max_gain_so_far: num(r.maxGainSoFar),
+    max_loss_so_far: num(r.maxLossSoFar),
+    metadata: r.metadata,
+  };
+}
+
+/** Round to 2dp the way `round(… ::numeric, 2)` did in SQL. */
+const round2 = (n: number) => Math.round(n * 100) / 100;
+
+/** Descending sort that keeps nulls last, matching `ORDER BY … DESC NULLS LAST`. */
+function byDescNullsLast(a: number | null, b: number | null): number {
+  if (a === null && b === null) return 0;
+  if (a === null) return 1;
+  if (b === null) return -1;
+  return b - a;
+}
+
 /** Data access for structured bets and their legs / snapshots / performance. */
 export const betsRepository = {
   async list(filters: BetFilters = {}): Promise<Bet[]> {
-    const conditions: string[] = [];
-    const params: unknown[] = [];
-
-    const add = (clause: string, value: unknown) => {
-      params.push(value);
-      conditions.push(clause.replace("$?", `$${params.length}`));
+    const where: Prisma.BetsWhereInput = {
+      ...(filters.ticker ? { ticker: filters.ticker.toUpperCase() } : {}),
+      ...(filters.optionType ? { optionType: filters.optionType } : {}),
+      ...(filters.verificationLevel
+        ? { verificationLevel: filters.verificationLevel }
+        : {}),
+      ...(filters.status ? { status: filters.status } : {}),
+      ...(filters.positionIntent ? { positionIntent: filters.positionIntent } : {}),
+      ...(typeof filters.minDeclaredCapital === "number"
+        ? { declaredCapital: { gte: filters.minDeclaredCapital } }
+        : {}),
     };
-
-    if (filters.ticker) add("ticker = $?", filters.ticker.toUpperCase());
-    if (filters.optionType) add("option_type = $?", filters.optionType);
-    if (filters.verificationLevel)
-      add("verification_level = $?", filters.verificationLevel);
-    if (filters.status) add("status = $?", filters.status);
-    if (filters.positionIntent) add("position_intent = $?", filters.positionIntent);
-    if (typeof filters.minDeclaredCapital === "number")
-      add("declared_capital >= $?", filters.minDeclaredCapital);
-
-    const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
-    params.push(filters.limit ?? 100);
 
     return safe(
       "list",
       async () => {
-        const rows = await query<Bet>(
-          `SELECT * FROM public.bets ${where} ORDER BY created_at DESC LIMIT $${params.length}`,
-          params,
-        );
+        const rows = await prisma.bets.findMany({
+          where,
+          orderBy: { createdAt: "desc" },
+          take: filters.limit ?? 100,
+        });
         // Fresh / unseeded DB: keep the public feed useful with labeled demo
         // data rather than an empty page. A narrowed (filtered) query respects
         // an empty result — the user filtered to nothing on purpose.
         if (rows.length === 0 && !hasFilters(filters)) return filterDemoBets(filters);
-        return rows;
+        return rows.map(toBet);
       },
       () => filterDemoBets(filters),
     );
@@ -87,11 +197,14 @@ export const betsRepository = {
 
   async findById(id: string): Promise<Bet | null> {
     // Guard non-UUID ids: Postgres would throw "invalid input syntax for type
-    // uuid" (→ 500). Return null so the route answers a clean 404 instead.
+    // uuid" (→ 500). Return the demo bet so the route answers cleanly instead.
     if (!UUID_RE.test(id)) return demoBetById(id);
     return safe(
       "findById",
-      async () => (await queryOne<Bet>(`SELECT * FROM public.bets WHERE id = $1`, [id])) ?? demoBetById(id),
+      async () => {
+        const row = await prisma.bets.findUnique({ where: { id } });
+        return row ? toBet(row) : demoBetById(id);
+      },
       () => demoBetById(id),
     );
   },
@@ -100,11 +213,13 @@ export const betsRepository = {
     if (!UUID_RE.test(betId)) return Promise.resolve(demoLegsForBet(betId));
     return safe(
       "legsForBet",
-      () =>
-        query<BetLeg>(
-          `SELECT * FROM public.bet_legs WHERE bet_id = $1 ORDER BY expiration_date ASC`,
-          [betId],
-        ),
+      async () =>
+        (
+          await prisma.betLegs.findMany({
+            where: { betId },
+            orderBy: { expirationDate: "asc" },
+          })
+        ).map(toLeg),
       () => demoLegsForBet(betId),
     );
   },
@@ -113,11 +228,13 @@ export const betsRepository = {
     if (!UUID_RE.test(betId)) return Promise.resolve([]);
     return safe(
       "snapshotsForBet",
-      () =>
-        query<BetSnapshot>(
-          `SELECT * FROM public.bet_snapshots WHERE bet_id = $1 ORDER BY snapshot_at ASC`,
-          [betId],
-        ),
+      async () =>
+        (
+          await prisma.betSnapshots.findMany({
+            where: { betId },
+            orderBy: { snapshotAt: "asc" },
+          })
+        ).map(toSnapshot),
       () => [],
     );
   },
@@ -127,10 +244,10 @@ export const betsRepository = {
     return safe(
       "performanceForBet",
       () =>
-        queryOne(
-          `SELECT * FROM public.bet_performance WHERE bet_id = $1 ORDER BY created_at DESC LIMIT 1`,
-          [betId],
-        ),
+        prisma.betPerformance.findFirst({
+          where: { betId },
+          orderBy: { createdAt: "desc" },
+        }),
       () => null,
     );
   },
@@ -140,10 +257,10 @@ export const betsRepository = {
     return safe(
       "verificationsForBet",
       () =>
-        query(
-          `SELECT * FROM public.bet_verifications WHERE bet_id = $1 ORDER BY created_at ASC`,
-          [betId],
-        ),
+        prisma.betVerifications.findMany({
+          where: { betId },
+          orderBy: { createdAt: "asc" },
+        }),
       () => [],
     );
   },
@@ -153,10 +270,10 @@ export const betsRepository = {
     return safe(
       "lifecycleForBet",
       () =>
-        query(
-          `SELECT * FROM public.bet_lifecycle_events WHERE bet_id = $1 ORDER BY occurred_at ASC`,
-          [betId],
-        ),
+        prisma.betLifecycleEvents.findMany({
+          where: { betId },
+          orderBy: { occurredAt: "asc" },
+        }),
       () => [],
     );
   },
@@ -164,62 +281,220 @@ export const betsRepository = {
   forTicker(ticker: string): Promise<Bet[]> {
     return safe(
       "forTicker",
-      () =>
-        query<Bet>(
-          `SELECT * FROM public.bets WHERE ticker = $1 ORDER BY declared_capital DESC NULLS LAST`,
-          [ticker],
-        ),
+      async () =>
+        (
+          await prisma.bets.findMany({
+            where: { ticker },
+            orderBy: { declaredCapital: { sort: "desc", nulls: "last" } },
+          })
+        ).map(toBet),
       () => filterDemoBets({ ticker }),
     );
   },
 
-  /** Leaderboard by latest snapshot return, joined to anonymized author reputation. */
+  /**
+   * Leaderboard by latest snapshot return, joined to anonymized author reputation.
+   *
+   * The lateral "newest snapshot per bet" join is expressed as a nested `take: 1`.
+   * Author reputation needs a second lookup: bets.author_hash has no foreign key
+   * to anonymized_authors, so Prisma has no relation to traverse. Ranking happens
+   * here rather than in SQL because it sorts on the joined snapshot's return_pct.
+   */
   leaderboard(limit = 20) {
-    return safe("leaderboard", () => query(
-      `SELECT b.id, b.ticker, b.option_type, b.declared_capital, b.verification_level,
-              b.author_hash, a.reputation_score, a.hit_rate,
-              s.return_pct, s.unrealized_pl
-       FROM public.bets b
-       LEFT JOIN LATERAL (
-         SELECT return_pct, unrealized_pl FROM public.bet_snapshots
-         WHERE bet_id = b.id ORDER BY snapshot_at DESC LIMIT 1
-       ) s ON true
-       LEFT JOIN public.anonymized_authors a ON a.author_hash = b.author_hash
-       ORDER BY s.return_pct DESC NULLS LAST
-       LIMIT $1`,
-      [limit],
-    ), () => []);
+    return safe(
+      "leaderboard",
+      async () => {
+        const bets = await prisma.bets.findMany({
+          select: {
+            id: true,
+            ticker: true,
+            optionType: true,
+            declaredCapital: true,
+            verificationLevel: true,
+            authorHash: true,
+            betSnapshots: {
+              select: { returnPct: true, unrealizedPl: true },
+              orderBy: { snapshotAt: "desc" },
+              take: 1,
+            },
+          },
+        });
+        if (bets.length === 0) return [];
+
+        const authorHashes = [
+          ...new Set(bets.map((b) => b.authorHash).filter((h): h is string => h !== null)),
+        ];
+        const authors = authorHashes.length
+          ? await prisma.anonymizedAuthors.findMany({
+              where: { authorHash: { in: authorHashes } },
+              select: { authorHash: true, reputationScore: true, hitRate: true },
+            })
+          : [];
+        const byAuthor = new Map(authors.map((a) => [a.authorHash, a]));
+
+        return bets
+          .map((b) => {
+            const author = b.authorHash ? byAuthor.get(b.authorHash) : undefined;
+            const snapshot = b.betSnapshots[0];
+            return {
+              id: b.id,
+              ticker: b.ticker,
+              option_type: b.optionType,
+              declared_capital: num(b.declaredCapital),
+              verification_level: b.verificationLevel,
+              author_hash: b.authorHash,
+              reputation_score: num(author?.reputationScore ?? null),
+              hit_rate: num(author?.hitRate ?? null),
+              return_pct: num(snapshot?.returnPct ?? null),
+              unrealized_pl: num(snapshot?.unrealizedPl ?? null),
+            };
+          })
+          .sort((a, b) => byDescNullsLast(a.return_pct, b.return_pct))
+          .slice(0, limit);
+      },
+      () => [],
+    );
+  },
+
+  /**
+   * Highest verification level reached per ticker, as a rank (0–5).
+   *
+   * Replaces `max(CASE verification_level …)` — the ordering is a property of
+   * the levels, not of the strings, so it lives in code next to the levels.
+   */
+  async verificationRankByTicker(): Promise<Map<string, number>> {
+    return safe(
+      "verificationRankByTicker",
+      async () => {
+        const rows = await prisma.bets.findMany({
+          select: { ticker: true, verificationLevel: true },
+        });
+
+        const ranks = new Map<string, number>();
+        for (const row of rows) {
+          if (!row.ticker) continue;
+          const rank = VERIFICATION_RANK[row.verificationLevel ?? ""] ?? 0;
+          ranks.set(row.ticker, Math.max(ranks.get(row.ticker) ?? 0, rank));
+        }
+        return ranks;
+      },
+      () => new Map<string, number>(),
+    );
   },
 
   /** Expiration calendar: contracts and premium grouped by expiration date. */
   expirationCalendar() {
-    return safe("expirationCalendar", () => query(
-      `SELECT l.expiration_date, b.ticker,
-              sum(l.contracts)::int AS contracts,
-              round(sum(l.contracts * l.premium * 100)::numeric, 2) AS premium_at_risk
-       FROM public.bet_legs l
-       JOIN public.bets b ON b.id = l.bet_id
-       WHERE l.expiration_date IS NOT NULL
-       GROUP BY l.expiration_date, b.ticker
-       ORDER BY l.expiration_date ASC`,
-    ), () => []);
+    return safe(
+      "expirationCalendar",
+      async () => {
+        // Grouped in memory because the grouping key spans two tables
+        // (bet_legs.expiration_date + bets.ticker), which Prisma's groupBy
+        // cannot join across.
+        const legs = await prisma.betLegs.findMany({
+          where: { expirationDate: { not: null } },
+          select: {
+            expirationDate: true,
+            contracts: true,
+            premium: true,
+            bets: { select: { ticker: true } },
+          },
+        });
+
+        const groups = new Map<
+          string,
+          { expiration_date: string; ticker: string | null; contracts: number; premium_at_risk: number }
+        >();
+
+        for (const leg of legs) {
+          const expiration = dateOnly(leg.expirationDate);
+          if (expiration === null) continue;
+          const ticker = leg.bets?.ticker ?? null;
+          const key = `${expiration}|${ticker ?? ""}`;
+
+          const group =
+            groups.get(key) ??
+            { expiration_date: expiration, ticker, contracts: 0, premium_at_risk: 0 };
+          group.contracts += leg.contracts ?? 0;
+          group.premium_at_risk += (leg.contracts ?? 0) * (num(leg.premium) ?? 0) * 100;
+          groups.set(key, group);
+        }
+
+        return [...groups.values()]
+          .map((g) => ({ ...g, premium_at_risk: round2(g.premium_at_risk) }))
+          .sort((a, b) => a.expiration_date.localeCompare(b.expiration_date));
+      },
+      () => [],
+    );
   },
 
   /** Collective realized/unrealized P/L across the latest snapshot of every bet. */
   collectivePl() {
-    return safe("collectivePl", () => query(
-      `SELECT b.ticker,
-              count(*)::int AS bets,
-              round(sum(coalesce(b.declared_capital,0))::numeric, 2) AS declared_capital,
-              round(sum(coalesce(s.unrealized_pl,0))::numeric, 2) AS unrealized_pl,
-              round(avg(s.return_pct)::numeric, 2) AS avg_return_pct
-       FROM public.bets b
-       LEFT JOIN LATERAL (
-         SELECT unrealized_pl, return_pct FROM public.bet_snapshots
-         WHERE bet_id = b.id ORDER BY snapshot_at DESC LIMIT 1
-       ) s ON true
-       GROUP BY b.ticker
-       ORDER BY unrealized_pl DESC`,
-    ), () => []);
+    return safe(
+      "collectivePl",
+      async () => {
+        const bets = await prisma.bets.findMany({
+          select: {
+            ticker: true,
+            declaredCapital: true,
+            betSnapshots: {
+              select: { unrealizedPl: true, returnPct: true },
+              orderBy: { snapshotAt: "desc" },
+              take: 1,
+            },
+          },
+        });
+
+        const groups = new Map<
+          string,
+          {
+            ticker: string | null;
+            bets: number;
+            declared_capital: number;
+            unrealized_pl: number;
+            returnSum: number;
+            returnCount: number;
+          }
+        >();
+
+        for (const bet of bets) {
+          const key = bet.ticker ?? "";
+          const group =
+            groups.get(key) ??
+            {
+              ticker: bet.ticker,
+              bets: 0,
+              declared_capital: 0,
+              unrealized_pl: 0,
+              returnSum: 0,
+              returnCount: 0,
+            };
+
+          group.bets += 1;
+          group.declared_capital += num(bet.declaredCapital) ?? 0;
+
+          const snapshot = bet.betSnapshots[0];
+          group.unrealized_pl += num(snapshot?.unrealizedPl ?? null) ?? 0;
+          // avg() ignores NULLs, so only bets with a snapshot return count.
+          const returnPct = num(snapshot?.returnPct ?? null);
+          if (returnPct !== null) {
+            group.returnSum += returnPct;
+            group.returnCount += 1;
+          }
+
+          groups.set(key, group);
+        }
+
+        return [...groups.values()]
+          .map((g) => ({
+            ticker: g.ticker,
+            bets: g.bets,
+            declared_capital: round2(g.declared_capital),
+            unrealized_pl: round2(g.unrealized_pl),
+            avg_return_pct: g.returnCount > 0 ? round2(g.returnSum / g.returnCount) : null,
+          }))
+          .sort((a, b) => b.unrealized_pl - a.unrealized_pl);
+      },
+      () => [],
+    );
   },
 };

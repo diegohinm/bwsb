@@ -1,19 +1,11 @@
 import { Router } from "express";
 
 import { ok, asyncHandler } from "../lib/response.js";
-import { query } from "../lib/db.js";
 import { metricsRepository } from "../repositories/metrics.repository.js";
+import { marketRepository } from "../repositories/market.repository.js";
+import { betsRepository, VERIFICATION_RANK } from "../repositories/bets.repository.js";
 
 export const screenerRouter = Router();
-
-const VERIFICATION_RANK: Record<string, number> = {
-  unverified: 0,
-  text_only: 1,
-  screenshot_detected: 2,
-  internally_consistent: 3,
-  market_validated: 4,
-  follow_up_verified: 5,
-};
 
 interface ScreenerRow {
   ticker: string;
@@ -36,25 +28,38 @@ interface ScreenerRow {
 screenerRouter.get(
   "/screener",
   asyncHandler(async (req, res) => {
-    const rows = (await query(
-      `SELECT m.ticker, m.mentions, m.mention_velocity, m.sentiment_score,
-              p.declared_yolo_capital, p.net_directional_conviction,
-              pc.score AS pump_score, ms.price,
-              coalesce(bv.vrank, 0) AS verification_rank
-       FROM (SELECT DISTINCT ON (ticker) ticker, mentions, mention_velocity, sentiment_score
-             FROM public.ticker_metrics_5m ORDER BY ticker, bucket_start DESC) m
-       LEFT JOIN (SELECT DISTINCT ON (ticker) ticker, declared_yolo_capital, net_directional_conviction
-             FROM public.ticker_positioning_indexes ORDER BY ticker, bucket_start DESC) p ON p.ticker = m.ticker
-       LEFT JOIN (SELECT DISTINCT ON (ticker) ticker, score
-             FROM public.pump_coordination_scores ORDER BY ticker, bucket_start DESC) pc ON pc.ticker = m.ticker
-       LEFT JOIN (SELECT DISTINCT ON (ticker) ticker, price
-             FROM public.market_snapshots ORDER BY ticker, snapshot_at DESC) ms ON ms.ticker = m.ticker
-       LEFT JOIN (SELECT ticker, max(CASE verification_level
-             WHEN 'follow_up_verified' THEN 5 WHEN 'market_validated' THEN 4
-             WHEN 'internally_consistent' THEN 3 WHEN 'screenshot_detected' THEN 2
-             WHEN 'text_only' THEN 1 ELSE 0 END) AS vrank
-             FROM public.bets GROUP BY ticker) bv ON bv.ticker = m.ticker`,
-    )) as ScreenerRow[];
+    // The screen is the newest row per ticker from four independent feeds, left
+    // joined onto the mention metrics. Each feed already has a "latest per
+    // ticker" repository read, so they are fetched in parallel and joined here
+    // on the ticker key.
+    const [metrics, positioning, pumps, snapshots, verificationRank] =
+      await Promise.all([
+        metricsRepository.heatmap(),
+        metricsRepository.positioningLatest(),
+        metricsRepository.pumpLatest(),
+        marketRepository.latestSnapshots(),
+        betsRepository.verificationRankByTicker(),
+      ]);
+
+    const positioningByTicker = new Map(positioning.map((p) => [p.ticker, p]));
+    const pumpByTicker = new Map(pumps.map((p) => [p.ticker, p]));
+    const priceByTicker = new Map(snapshots.map((s) => [s.ticker, s.price]));
+
+    const rows: ScreenerRow[] = metrics.map((m) => {
+      const ticker = String(m.ticker);
+      const position = positioningByTicker.get(ticker);
+      return {
+        ticker,
+        mentions: Number(m.mentions ?? 0),
+        mention_velocity: Number(m.mention_velocity ?? 0),
+        sentiment_score: Number(m.sentiment_score ?? 0),
+        declared_yolo_capital: position?.declared_yolo_capital ?? null,
+        net_directional_conviction: position?.net_directional_conviction ?? null,
+        pump_score: pumpByTicker.get(ticker)?.score ?? null,
+        price: priceByTicker.get(ticker) ?? null,
+        verification_rank: verificationRank.get(ticker) ?? 0,
+      };
+    });
 
     const breakoutSet = new Set(
       (await metricsRepository.trendByClassification("fresh_breakout", 50)).map((r) => r.ticker),

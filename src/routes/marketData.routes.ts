@@ -2,14 +2,16 @@ import { Router } from "express";
 
 import { ok, fail, asyncHandler } from "../lib/response.js";
 import {
-  getQuote,
-  getQuotes,
   getCandles,
-  getMarketMovers,
   getOptionChain,
   getMarketProviderStatus,
   getMarketDataDiagnostics,
 } from "../services/market-data/marketData.service.js";
+import {
+  getStoredQuote,
+  getStoredQuotes,
+  getStoredMovers,
+} from "../services/market-data/marketRead.service.js";
 import {
   CANDLE_TIMEFRAMES,
   MARKET_SESSIONS,
@@ -43,13 +45,19 @@ marketDataRouter.get(
   }),
 );
 
-/** GET /api/market-data/quote/:symbol */
+/**
+ * GET /api/market-data/quote/:symbol
+ *
+ * Reads `market_quotes_latest` — the ingestion worker's output. This route never
+ * calls Databento; a symbol the worker has not published yet comes back as
+ * clearly labeled demo data.
+ */
 marketDataRouter.get(
   "/market-data/quote/:symbol",
-  asyncHandler(async (req, res) => ok(res, await getQuote(req.params.symbol))),
+  asyncHandler(async (req, res) => ok(res, await getStoredQuote(req.params.symbol))),
 );
 
-/** GET /api/market-data/quotes?symbols=RDDT,NVDA,TSLA */
+/** GET /api/market-data/quotes?symbols=RDDT,NVDA,TSLA — reads the DB only. */
 marketDataRouter.get(
   "/market-data/quotes",
   asyncHandler(async (req, res) => {
@@ -60,7 +68,7 @@ marketDataRouter.get(
       .filter(Boolean)
       .slice(0, 50);
     if (symbols.length === 0) return fail(res, "Provide ?symbols=RDDT,NVDA,…", 400);
-    return ok(res, await getQuotes(symbols));
+    return ok(res, await getStoredQuotes(symbols));
   }),
 );
 
@@ -85,7 +93,13 @@ marketDataRouter.get(
   }),
 );
 
-/** GET /api/market-data/movers?session=premarket&limit=10 */
+/**
+ * GET /api/market-data/movers?session=premarket|overnight&limit=10
+ *
+ * Reads the newest `market_movers_snapshots` row set for the session. Never
+ * calls Databento — `updatedAt` is the snapshot's own timestamp, so the client
+ * can see how fresh (or stale) the worker's last run is.
+ */
 marketDataRouter.get(
   "/market-data/movers",
   asyncHandler(async (req, res) => {
@@ -95,7 +109,7 @@ marketDataRouter.get(
         ? (sessionRaw as MarketSession | "all")
         : "all";
     const limit = Math.min(50, numOrUndef(req.query.limit) ?? 10);
-    return ok(res, await getMarketMovers({ session, limit }));
+    return ok(res, await getStoredMovers({ session, limit }));
   }),
 );
 

@@ -1,27 +1,64 @@
-import { query, queryOne } from "../lib/db.js";
+import { prisma } from "../lib/prisma.js";
+import { toDbRow, toDbRows } from "../lib/rows.js";
 import type { RedditPost } from "../types/domain.js";
 
-/** Data access for reddit posts and comments. */
+/**
+ * Data access for reddit posts and comments.
+ *
+ * Rows are returned with their database column names (see lib/rows.ts) because
+ * the ticker/research routes serialize them straight onto the wire.
+ */
 export const postsRepository = {
-  findById(redditPostId: string): Promise<RedditPost | null> {
-    return queryOne<RedditPost>(
-      `SELECT * FROM public.reddit_posts WHERE reddit_post_id = $1`,
-      [redditPostId],
-    );
+  async findById(redditPostId: string): Promise<RedditPost | null> {
+    const row = await prisma.redditPosts.findUnique({ where: { redditPostId } });
+    return row ? toDbRow<RedditPost>("RedditPosts", row) : null;
   },
 
-  recent(limit = 50): Promise<RedditPost[]> {
-    return query<RedditPost>(
-      `SELECT * FROM public.reddit_posts ORDER BY reddit_created_at DESC NULLS LAST LIMIT $1`,
-      [limit],
-    );
+  async recent(limit = 50): Promise<RedditPost[]> {
+    const rows = await prisma.redditPosts.findMany({
+      orderBy: { redditCreatedAt: { sort: "desc", nulls: "last" } },
+      take: limit,
+    });
+    return toDbRows<RedditPost>("RedditPosts", rows);
   },
 
-  commentsForPost(redditPostId: string) {
-    return query(
-      `SELECT reddit_comment_id, reddit_post_id, subreddit, author_hash, body_excerpt, score, reddit_created_at
-       FROM public.reddit_comments WHERE reddit_post_id = $1 ORDER BY score DESC`,
-      [redditPostId],
-    );
+  /** Free-text search over post titles and bodies, newest first. */
+  async search(term: string, limit = 5) {
+    const rows = await prisma.redditPosts.findMany({
+      where: {
+        OR: [
+          { title: { contains: term, mode: "insensitive" } },
+          { bodyExcerpt: { contains: term, mode: "insensitive" } },
+        ],
+      },
+      select: {
+        redditPostId: true,
+        subreddit: true,
+        title: true,
+        score: true,
+        numComments: true,
+        redditCreatedAt: true,
+      },
+      orderBy: { redditCreatedAt: { sort: "desc", nulls: "last" } },
+      take: limit,
+    });
+    return toDbRows("RedditPosts", rows);
+  },
+
+  async commentsForPost(redditPostId: string) {
+    const rows = await prisma.redditComments.findMany({
+      where: { redditPostId },
+      select: {
+        redditCommentId: true,
+        redditPostId: true,
+        subreddit: true,
+        authorHash: true,
+        bodyExcerpt: true,
+        score: true,
+        redditCreatedAt: true,
+      },
+      orderBy: { score: "desc" },
+    });
+    return toDbRows("RedditComments", rows);
   },
 };

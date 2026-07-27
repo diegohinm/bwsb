@@ -75,6 +75,39 @@ export interface MarketQuote {
   warning?: string;
 }
 
+/**
+ * One normalized OHLCV bar from a historical (delayed) feed: real prices, an ISO
+ * timestamp, and the ticker it belongs to. This is what the ingestion worker
+ * stores — see MarketDataProvider.getDelayedBars.
+ */
+export interface DelayedBar {
+  symbol: string;
+  open: number | null;
+  high: number | null;
+  low: number | null;
+  close: number | null;
+  volume: number | null;
+  /** Bar timestamp — guaranteed to be at or before the requested cutoff. */
+  observedAt: string;
+}
+
+export interface DelayedBarsResult {
+  /** Newest bar at or before the cutoff, per symbol. Empty = no bar in range. */
+  latestBySymbol: Map<string, DelayedBar>;
+  windowStart: string;
+  /** min(cutoff, dataset availability end) — the ceiling actually requested. */
+  windowEnd: string;
+  recordsFetched: number;
+  /** True when the narrow window was empty and a wider one was used. */
+  widened: boolean;
+  /**
+   * How far the provider's historical data reaches. Null when unknown. When this
+   * is behind the cutoff, the feed itself — not our delay policy — is what
+   * limits freshness, and callers must report the real bar age.
+   */
+  availableEnd?: string | null;
+}
+
 export interface MarketCandle {
   symbol: string;
   provider: MarketDataProviderName;

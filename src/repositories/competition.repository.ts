@@ -1,30 +1,28 @@
-import { query, queryOne } from "../lib/db.js";
+import { prisma } from "../lib/prisma.js";
+import { num } from "../lib/numeric.js";
 
 /** Data access for competitions, participants and leaderboard. */
 export const competitionRepository = {
   activeCompetition() {
-    return queryOne(
-      `SELECT * FROM public.competitions WHERE is_active = true
-       ORDER BY created_at ASC LIMIT 1`,
-    );
+    return prisma.competitions.findFirst({
+      where: { isActive: true },
+      orderBy: { createdAt: "asc" },
+    });
   },
 
   participant(competitionId: string, userId: string) {
-    return queryOne(
-      `SELECT * FROM public.competition_participants
-       WHERE competition_id = $1 AND user_id = $2`,
-      [competitionId, userId],
-    );
+    return prisma.competitionParticipants.findUnique({
+      where: { competitionId_userId: { competitionId, userId } },
+    });
   },
 
   join(competitionId: string, userId: string, virtualAccountId: string) {
-    return queryOne(
-      `INSERT INTO public.competition_participants (competition_id, user_id, virtual_account_id)
-       VALUES ($1,$2,$3)
-       ON CONFLICT (competition_id, user_id) DO UPDATE SET virtual_account_id = EXCLUDED.virtual_account_id
-       RETURNING *`,
-      [competitionId, userId, virtualAccountId],
-    );
+    return prisma.competitionParticipants.upsert({
+      where: { competitionId_userId: { competitionId, userId } },
+      create: { competitionId, userId, virtualAccountId },
+      // Re-joining repoints the entry at the caller's current virtual account.
+      update: { virtualAccountId },
+    });
   },
 
   /**
@@ -34,30 +32,70 @@ export const competitionRepository = {
    * Participants key off public.app_users (uuid) — the email-auth identity that
    * sessions are issued against — so the username is resolved from app_users
    * (verified Reddit handle → display name → email local-part), NOT the legacy
-   * public.users table (whose text id is a different type and would throw
-   * `operator does not exist: text = uuid`).
+   * public.users table (whose text id is a different type).
+   *
+   * The verified-Reddit-handle lookup was a LATERAL join; Prisma expresses it as
+   * a filtered nested read, and the rank() window function is applied here after
+   * ordering by equity.
    */
-  leaderboard(competitionId: string) {
-    return query(
-      `SELECT p.user_id,
-              COALESCE(ra.reddit_username, au.display_name, split_part(au.email, '@', 1)) AS username,
-              va.equity_value,
-              va.starting_cash,
-              round((( (va.equity_value - va.starting_cash) / NULLIF(va.starting_cash,0) ) * 100)::numeric, 2) AS return_pct,
-              rank() OVER (ORDER BY va.equity_value DESC) AS rank
-       FROM public.competition_participants p
-       JOIN public.virtual_accounts va ON va.id = p.virtual_account_id
-       LEFT JOIN public.app_users au ON au.id = p.user_id
-       LEFT JOIN LATERAL (
-         SELECT reddit_username
-           FROM public.reddit_accounts
-          WHERE user_id = p.user_id AND verification_status = 'verified'
-          ORDER BY updated_at DESC
-          LIMIT 1
-       ) ra ON true
-       WHERE p.competition_id = $1
-       ORDER BY va.equity_value DESC`,
-      [competitionId],
-    );
+  async leaderboard(competitionId: string) {
+    const participants = await prisma.competitionParticipants.findMany({
+      where: { competitionId, virtualAccounts: { isNot: null } },
+      select: {
+        userId: true,
+        virtualAccounts: { select: { equityValue: true, startingCash: true } },
+        appUsers: {
+          select: {
+            displayName: true,
+            email: true,
+            redditAccounts: {
+              where: { verificationStatus: "verified" },
+              select: { redditUsername: true },
+              orderBy: { updatedAt: "desc" },
+              take: 1,
+            },
+          },
+        },
+      },
+    });
+
+    const rows = participants
+      // The JOIN on virtual_accounts was an inner join: no account, no entry.
+      .filter((p) => p.virtualAccounts !== null)
+      .map((p) => {
+        const equityValue = num(p.virtualAccounts!.equityValue) ?? 0;
+        const startingCash = num(p.virtualAccounts!.startingCash) ?? 0;
+        // NULLIF(starting_cash, 0): dividing by a zero float would give ±Infinity.
+        const returnPct =
+          startingCash === 0
+            ? null
+            : Math.round(((equityValue - startingCash) / startingCash) * 100 * 100) / 100;
+
+        return {
+          user_id: p.userId,
+          username:
+            p.appUsers?.redditAccounts[0]?.redditUsername ??
+            p.appUsers?.displayName ??
+            p.appUsers?.email.split("@")[0] ??
+            null,
+          equity_value: equityValue,
+          starting_cash: startingCash,
+          return_pct: returnPct,
+          rank: 0,
+        };
+      })
+      .sort((a, b) => b.equity_value - a.equity_value);
+
+    // rank() OVER (ORDER BY equity_value DESC): ties share a rank, and the next
+    // rank skips the tied entries.
+    let rank = 0;
+    let previousEquity: number | null = null;
+    return rows.map((row, index) => {
+      if (previousEquity === null || row.equity_value !== previousEquity) {
+        rank = index + 1;
+        previousEquity = row.equity_value;
+      }
+      return { ...row, rank };
+    });
   },
 };

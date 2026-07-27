@@ -61,6 +61,17 @@ const envSchema = z.object({
     .enum(["development", "test", "production"])
     .default("development"),
 
+  /**
+   * Which process this is. The deployment runs TWO services from this repo:
+   *   api    → src/server.ts. Serves HTTP, reads DB/cache ONLY. Never calls
+   *            Mindcase or Databento on a user request.
+   *   worker → src/worker.ts. Runs the ingestion jobs, calls the providers,
+   *            writes snapshots to the DB. Exposes no HTTP.
+   *   all    → single-process local development (default): the API also allows
+   *            provider calls, so `npm run dev` alone still works.
+   */
+  SERVICE_ROLE: z.enum(["api", "worker", "all"]).default("all"),
+
   // Public origin of the frontend. Also the only allowed CORS origin. Accepts
   // FRONTEND_ORIGIN (new name); the code still reads env.FRONTEND_URL too (alias
   // added below) for backwards compatibility.
@@ -150,6 +161,11 @@ const envSchema = z.object({
   MINDCASE_MAX_POLLS: intEnv(10, 1, 100),
   /** Retries after a 429 / 5xx before failing with a controlled error. */
   MINDCASE_MAX_RETRIES: intEnv(3, 0, 10),
+
+  /** WORKER: seconds between social ingestion runs (refreshSocialPulse). */
+  SOCIAL_DATA_REFRESH_SECONDS: intEnv(600, 60, 86_400),
+  /** WORKER: seconds between ticker-strip snapshot runs. */
+  TICKER_STRIP_REFRESH_SECONDS: intEnv(300, 60, 86_400),
   // How long a social payload is cached before the provider is queried again.
   // SOCIAL_DATA_CACHE_TTL_SECONDS is the canonical name; SOCIAL_CACHE_TTL_SECONDS
   // is accepted as a legacy alias. Resolved into env.SOCIAL_CACHE_TTL_SECONDS below.
@@ -177,6 +193,22 @@ const envSchema = z.object({
     .enum(["mock", "delayed", "realtime", "end_of_day"])
     .default("delayed"),
   MARKET_DATA_CACHE_TTL_SECONDS: z.coerce.number().int().positive().default(10),
+  /**
+   * How far behind real-time the published market data is, in minutes. Shown in
+   * the UI ("Delayed 15m") and stored on every worker-written quote/mover row.
+   */
+  MARKET_DATA_DELAY_MINUTES: intEnv(15, 0, 1_440),
+  /**
+   * WORKER: seconds between market quote ingestion runs.
+   *
+   * Default 300, not 60: the delayed path pulls historical bars for the whole
+   * watchlist (measured 40-80s per run), and a historical dataset republishes
+   * roughly once a day — a 60s loop would fetch continuously for data that has
+   * not moved. Lower it only if you move to a feed that updates intraday.
+   */
+  MARKET_DATA_REFRESH_SECONDS: intEnv(300, 15, 86_400),
+  /** WORKER: seconds between market movers snapshot runs. */
+  MARKET_MOVERS_REFRESH_SECONDS: intEnv(60, 15, 86_400),
 
   // Databento — backend-only. The API key plus the two account-specific dataset
   // ids are the ONLY Databento env vars. Blank key = misconfigured → mock
@@ -184,6 +216,18 @@ const envSchema = z.object({
   DATABENTO_API_KEY: optionalNonEmpty,
   DATABENTO_DATASET: optionalNonEmpty,
   DATABENTO_OVERNIGHT_DATASET: optionalNonEmpty,
+
+  /**
+   * Whether `prisma db seed` may insert DEVELOPMENT/DEMO content — fake users,
+   * bets, portfolios, social posts and mock market data.
+   *
+   * Defaults to FALSE so a seed run against production only writes reference
+   * data (the ticker catalog and the default competition definition). It is
+   * additionally refused outright when NODE_ENV=production, see
+   * `demoSeedAllowed` below — an accidental `SEED_DEMO_DATA=true` in a
+   * production environment must not be able to publish fake bets.
+   */
+  SEED_DEMO_DATA: boolFromString(false),
 });
 
 const parsed = envSchema.safeParse(process.env);
@@ -241,5 +285,13 @@ export const env = {
 };
 
 export const isProduction = env.NODE_ENV === "production";
+
+/**
+ * Demo/development seed content may only be written when it was explicitly
+ * asked for AND this is not production. Two independent conditions on purpose:
+ * a stray SEED_DEMO_DATA=true in a production environment must never be able to
+ * insert fake users, bets or mock quotes.
+ */
+export const demoSeedAllowed: boolean = env.SEED_DEMO_DATA && !isProduction;
 
 export type Env = typeof env;

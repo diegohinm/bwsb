@@ -21,16 +21,34 @@ export interface OptionQuote {
 }
 
 export interface OptionsDataAdapter {
-  getChain(ticker: string): Promise<OptionQuote[]>;
+  /** Contracts for an underlying symbol (canonical name for options records). */
+  getChain(underlying: string): Promise<OptionQuote[]>;
   readonly provider: string;
 }
 
 export const optionsDataAdapter: OptionsDataAdapter = {
   provider: "stub",
-  async getChain(ticker: string) {
-    return (await marketRepository.optionContracts(
-      ticker.toUpperCase(),
-    )) as OptionQuote[];
+  async getChain(underlying: string) {
+    const rows = await marketRepository.optionContracts(underlying.toUpperCase());
+
+    // The stored column is `underlying` (the canonical options naming); this
+    // interface calls the same thing `ticker`, so the two are mapped explicitly
+    // rather than cast — a blind cast left `ticker` undefined on every quote.
+    return rows.map((r) => ({
+      ticker: r.underlying,
+      option_type: r.option_type,
+      strike: r.strike,
+      expiration_date: r.expiration_date
+        ? r.expiration_date.toISOString().slice(0, 10)
+        : null,
+      bid: r.bid,
+      ask: r.ask,
+      mid: r.mid,
+      implied_volatility: r.implied_volatility,
+      delta: r.delta,
+      open_interest: r.open_interest,
+      volume: r.volume,
+    }));
   },
 };
 

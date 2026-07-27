@@ -11,6 +11,14 @@
 export const PULSE_TIMEFRAMES = ["1h", "6h", "24h", "7d"] as const;
 export type PulseTimeframe = (typeof PULSE_TIMEFRAMES)[number];
 
+/** How much history each timeframe covers, in milliseconds. */
+export const PULSE_TIMEFRAME_MS: Record<PulseTimeframe, number> = {
+  "1h": 60 * 60 * 1000,
+  "6h": 6 * 60 * 60 * 1000,
+  "24h": 24 * 60 * 60 * 1000,
+  "7d": 7 * 24 * 60 * 60 * 1000,
+};
+
 export function isPulseTimeframe(value: unknown): value is PulseTimeframe {
   return (
     typeof value === "string" &&

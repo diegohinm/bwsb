@@ -1,72 +1,132 @@
-import { query, queryOne } from "../lib/db.js";
+import { prisma } from "../lib/prisma.js";
+import { toDbRow, toDbRows } from "../lib/rows.js";
 import type { MarketSnapshot } from "../types/domain.js";
 
-/** Data access for market data (snapshots, options, short interest, news…). */
+/**
+ * Data access for market data (snapshots, options, short interest, news…).
+ *
+ * Rows are returned with their database column names (see lib/rows.ts) because
+ * the ticker/research routes serialize them straight onto the wire.
+ *
+ * "Latest per ticker" was `DISTINCT ON (ticker)`, which Prisma has no equivalent
+ * for: group to find each ticker's newest snapshot_at, then fetch those rows.
+ */
+/** One row of option_contract_snapshots. The symbol column is `underlying`. */
+export interface OptionContractRow {
+  id: string;
+  chain_snapshot_id: string | null;
+  underlying: string;
+  option_type: "call" | "put" | null;
+  strike: number | null;
+  expiration_date: Date | null;
+  bid: number | null;
+  ask: number | null;
+  mid: number | null;
+  last: number | null;
+  volume: number | null;
+  open_interest: number | null;
+  implied_volatility: number | null;
+  delta: number | null;
+  gamma: number | null;
+  theta: number | null;
+  vega: number | null;
+  snapshot_at: Date;
+}
+
 export const marketRepository = {
-  latestSnapshot(ticker: string): Promise<MarketSnapshot | null> {
-    return queryOne<MarketSnapshot>(
-      `SELECT * FROM public.market_snapshots WHERE ticker = $1
-       ORDER BY snapshot_at DESC LIMIT 1`,
-      [ticker],
-    );
+  async latestSnapshot(ticker: string): Promise<MarketSnapshot | null> {
+    const row = await prisma.marketSnapshots.findFirst({
+      where: { ticker },
+      orderBy: { snapshotAt: "desc" },
+    });
+    return row ? toDbRow<MarketSnapshot>("MarketSnapshots", row) : null;
   },
 
-  latestSnapshots(): Promise<MarketSnapshot[]> {
-    return query<MarketSnapshot>(
-      `SELECT DISTINCT ON (ticker) * FROM public.market_snapshots
-       ORDER BY ticker, snapshot_at DESC`,
-    );
+  async latestSnapshots(): Promise<MarketSnapshot[]> {
+    const newestPerTicker = await prisma.marketSnapshots.groupBy({
+      by: ["ticker"],
+      _max: { snapshotAt: true },
+    });
+    const keys = newestPerTicker
+      .filter((g) => g._max.snapshotAt !== null)
+      .map((g) => ({ ticker: g.ticker, snapshotAt: g._max.snapshotAt! }));
+    if (keys.length === 0) return [];
+
+    const rows = await prisma.marketSnapshots.findMany({
+      where: { OR: keys },
+      orderBy: { ticker: "asc" },
+    });
+    return toDbRows<MarketSnapshot>("MarketSnapshots", rows);
   },
 
-  optionContracts(ticker: string) {
-    return query(
-      `SELECT * FROM public.option_contract_snapshots WHERE ticker = $1
-       ORDER BY expiration_date ASC, strike ASC`,
-      [ticker],
-    );
+  /**
+   * Contracts for an underlying. Options records key on `underlying` — the
+   * canonical column name across the options tables (never ticker/symbol).
+   */
+  async optionContracts(underlying: string): Promise<OptionContractRow[]> {
+    const rows = await prisma.optionContractSnapshots.findMany({
+      where: { underlying },
+      orderBy: [{ expirationDate: "asc" }, { strike: "asc" }],
+    });
+    return toDbRows<OptionContractRow>("OptionContractSnapshots", rows);
   },
 
-  shortInterest(ticker: string) {
-    return queryOne(
-      `SELECT * FROM public.short_interest_snapshots WHERE ticker = $1
-       ORDER BY snapshot_at DESC LIMIT 1`,
-      [ticker],
-    );
+  async shortInterest(ticker: string) {
+    const row = await prisma.shortInterestSnapshots.findFirst({
+      where: { ticker },
+      orderBy: { snapshotAt: "desc" },
+    });
+    return row ? toDbRow("ShortInterestSnapshots", row) : null;
   },
 
-  shortInterestLatest() {
-    return query(
-      `SELECT DISTINCT ON (ticker) * FROM public.short_interest_snapshots
-       ORDER BY ticker, snapshot_at DESC`,
-    );
+  async shortInterestLatest() {
+    const newestPerTicker = await prisma.shortInterestSnapshots.groupBy({
+      by: ["ticker"],
+      _max: { snapshotAt: true },
+    });
+    const keys = newestPerTicker
+      .filter((g) => g._max.snapshotAt !== null)
+      .map((g) => ({ ticker: g.ticker, snapshotAt: g._max.snapshotAt! }));
+    if (keys.length === 0) return [];
+
+    const rows = await prisma.shortInterestSnapshots.findMany({
+      where: { OR: keys },
+      orderBy: { ticker: "asc" },
+    });
+    return toDbRows("ShortInterestSnapshots", rows);
   },
 
-  newsForTicker(ticker: string, limit = 20) {
-    return query(
-      `SELECT * FROM public.news_events WHERE ticker = $1 ORDER BY published_at DESC LIMIT $2`,
-      [ticker, limit],
-    );
+  async newsForTicker(ticker: string, limit = 20) {
+    const rows = await prisma.newsEvents.findMany({
+      where: { ticker },
+      orderBy: { publishedAt: "desc" },
+      take: limit,
+    });
+    return toDbRows("NewsEvents", rows);
   },
 
-  insiderForTicker(ticker: string, limit = 20) {
-    return query(
-      `SELECT * FROM public.insider_activity_events WHERE ticker = $1 ORDER BY filed_at DESC LIMIT $2`,
-      [ticker, limit],
-    );
+  async insiderForTicker(ticker: string, limit = 20) {
+    const rows = await prisma.insiderActivityEvents.findMany({
+      where: { ticker },
+      orderBy: { filedAt: "desc" },
+      take: limit,
+    });
+    return toDbRows("InsiderActivityEvents", rows);
   },
 
-  externalSocial(ticker: string) {
-    return queryOne(
-      `SELECT * FROM public.external_social_snapshots WHERE ticker = $1
-       ORDER BY snapshot_at DESC LIMIT 1`,
-      [ticker],
-    );
+  async externalSocial(ticker: string) {
+    const row = await prisma.externalSocialSnapshots.findFirst({
+      where: { ticker },
+      orderBy: { snapshotAt: "desc" },
+    });
+    return row ? toDbRow("ExternalSocialSnapshots", row) : null;
   },
 
-  catalystsForTicker(ticker: string) {
-    return query(
-      `SELECT * FROM public.catalyst_events WHERE ticker = $1 ORDER BY event_date ASC`,
-      [ticker],
-    );
+  async catalystsForTicker(ticker: string) {
+    const rows = await prisma.catalystEvents.findMany({
+      where: { ticker },
+      orderBy: { eventDate: "asc" },
+    });
+    return toDbRows("CatalystEvents", rows);
   },
 };

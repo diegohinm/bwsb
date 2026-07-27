@@ -6,8 +6,10 @@ import cookieParser from "cookie-parser";
 
 import { env, isProduction, isRedditOAuthConfigured } from "./config/env.js";
 import { BRANDING } from "./config/branding.js";
+import { SERVICE_ROLE, providerCallsAllowed } from "./config/serviceRole.js";
 import { getSocialProviderStatus } from "./services/social/index.js";
 import { sessionMiddleware } from "./lib/sessionStore.js";
+import { registerPrismaShutdown } from "./lib/prisma.js";
 import { optionalAuth } from "./middleware/optionalAuth.js";
 import { healthRouter } from "./routes/health.routes.js";
 import { authRouter } from "./routes/auth.routes.js";
@@ -32,6 +34,14 @@ import { personalRouter } from "./routes/personal.routes.js";
 import { notFound } from "./middleware/notFound.js";
 import { errorHandler } from "./middleware/errorHandler.js";
 
+/**
+ * YOLOPulse API server (bwsb-api).
+ *
+ * ONE OF TWO PROCESSES. This one serves HTTP and reads the DATABASE ONLY —
+ * pulse, ticker strip, quotes and movers are all worker-written snapshots, so a
+ * user request never triggers a Mindcase or Databento call. Ingestion lives in
+ * src/worker.ts (npm run worker) and is the only process holding provider keys.
+ */
 const app = express();
 
 // Behind a proxy/load balancer in production so that Secure cookies work and
@@ -98,20 +108,31 @@ app.use("/api", personalRouter);
 app.use(notFound);
 app.use(errorHandler);
 
-app.listen(env.PORT, () => {
+const server = app.listen(env.PORT, () => {
   console.log(
-    `${BRANDING.productName} backend (${BRANDING.backendName}) running on ${env.BACKEND_URL}`,
+    `${BRANDING.productName} API (${BRANDING.backendName}) running on ${env.BACKEND_URL} — role=${SERVICE_ROLE}`,
   );
   console.log(
     `Reddit OAuth: ${
       isRedditOAuthConfigured ? "configured" : "NOT configured (email auth only)"
     }`,
   );
+  console.log(
+    providerCallsAllowed
+      ? "Data: reads DB snapshots; provider calls are ALLOWED in this process (SERVICE_ROLE=all — dev). Run `npm run dev:worker` for ingestion."
+      : "Data: reads DB snapshots only — Mindcase/Databento calls are blocked in this process. Ingestion runs in bwsb-worker.",
+  );
   void getSocialProviderStatus().then((social) => {
     console.log(
-      `Social data provider: ${social.provider} (${social.status})${
+      `Configured social provider: ${social.provider} (${social.status})${
         social.message ? ` — ${social.message}` : ""
       }`,
     );
   });
+});
+
+// On SIGTERM/SIGINT (a Render redeploy, a local Ctrl-C): stop accepting new
+// connections, let in-flight requests finish, then release the Prisma pool.
+registerPrismaShutdown("api", async () => {
+  await new Promise<void>((resolve) => server.close(() => resolve()));
 });

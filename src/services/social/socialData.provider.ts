@@ -3,11 +3,26 @@ import type {
   SocialContentType,
   SocialDataProviderName,
   SocialFeedSort,
+  SocialPostItem,
   SocialProviderStatus,
   SocialSentiment,
   SubredditPulseResponse,
   TickerSocialFeedResponse,
 } from "./socialData.types.js";
+
+/**
+ * Raw normalized items plus per-subreddit failure detail. Consumed by the
+ * ingestion worker, which persists the items and computes the aggregates once
+ * instead of on every API request.
+ */
+export interface SocialItemsResult {
+  items: SocialPostItem[];
+  /** Subreddits whose fetch failed. Partial results are still returned. */
+  failed: string[];
+  /** True when at least one failure was an upstream rate limit (429). */
+  rateLimited: boolean;
+  attempted: number;
+}
 
 /**
  * Contract every social data source implements. Callers depend only on this
@@ -35,4 +50,15 @@ export interface SocialDataProvider {
     subreddit?: string | "all";
     sort?: SocialFeedSort;
   }): Promise<TickerSocialFeedResponse>;
+
+  /**
+   * INGESTION ONLY — raw items for the worker to persist. Optional so a provider
+   * that cannot expose raw items (or is a stub) still satisfies the contract;
+   * the worker falls back to demo ingestion when it is missing.
+   */
+  fetchItems?(params: {
+    subreddits?: string[];
+    keyword?: string;
+    timeframe?: PulseTimeframe;
+  }): Promise<SocialItemsResult>;
 }

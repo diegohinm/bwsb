@@ -1,4 +1,4 @@
-import { query } from "../lib/db.js";
+import { prisma, disconnectPrisma } from "../lib/prisma.js";
 import { competitionRepository } from "../repositories/competition.repository.js";
 
 /**
@@ -30,9 +30,11 @@ const num = (v: unknown): number | null => {
 async function main(): Promise<void> {
   let competitions: Array<{ id: string; name: string }> = [];
   try {
-    competitions = await query<{ id: string; name: string }>(
-      `SELECT id, name FROM public.competitions WHERE is_active = true ORDER BY created_at ASC`,
-    );
+    competitions = await prisma.competitions.findMany({
+      where: { isActive: true },
+      select: { id: true, name: true },
+      orderBy: { createdAt: "asc" },
+    });
   } catch (err) {
     console.error(
       "[leaderboard:recalculate] cannot read competitions:",
@@ -53,22 +55,17 @@ async function main(): Promise<void> {
         competition.id,
       )) as LeaderboardRow[];
 
-      let written = 0;
-      for (const row of rows) {
-        await query(
-          `INSERT INTO public.competition_leaderboard_snapshots
-             (competition_id, user_id, rank, equity_value, return_pct)
-           VALUES ($1, $2, $3, $4, $5)`,
-          [
-            competition.id,
-            row.user_id,
-            num(row.rank),
-            num(row.equity_value),
-            num(row.return_pct),
-          ],
-        );
-        written += 1;
-      }
+      // One snapshot batch per competition: a partially written leaderboard
+      // would rank some participants against an incomplete field.
+      const { count: written } = await prisma.competitionLeaderboardSnapshots.createMany({
+        data: rows.map((row) => ({
+          competitionId: competition.id,
+          userId: row.user_id,
+          rank: num(row.rank),
+          equityValue: num(row.equity_value),
+          returnPct: num(row.return_pct),
+        })),
+      });
       totalRows += written;
       console.log(
         `[leaderboard:recalculate] "${competition.name}" (${competition.id}): ${written} ranked snapshot rows written`,
@@ -86,4 +83,4 @@ async function main(): Promise<void> {
   );
 }
 
-void main();
+void main().finally(disconnectPrisma);

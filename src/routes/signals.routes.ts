@@ -1,7 +1,6 @@
 import { Router } from "express";
 
 import { ok, fail, asyncHandler } from "../lib/response.js";
-import { query } from "../lib/db.js";
 import { postsRepository } from "../repositories/posts.repository.js";
 import { metricsRepository } from "../repositories/metrics.repository.js";
 import { mentionsRepository } from "../repositories/mentions.repository.js";
@@ -149,14 +148,8 @@ signalsRouter.get(
 signalsRouter.get(
   "/signals/accuracy",
   asyncHandler(async (_req, res) => {
-    const rows = (await query(
-      `SELECT count(*)::int AS resolved,
-              count(*) FILTER (WHERE outcome = 'win')::int AS wins,
-              round(avg(return_pct)::numeric, 2) AS avg_return
-       FROM public.author_signal_history WHERE resolved_at IS NOT NULL`,
-    )) as Array<{ resolved: number; wins: number; avg_return: number | null }>;
-    const stats = rows[0];
-    if (!stats || stats.resolved === 0) return fail(res, "No resolved signals yet", 404);
+    const stats = await metricsRepository.resolvedSignalStats();
+    if (stats.resolved === 0) return fail(res, "No resolved signals yet", 404);
     return ok(res, {
       resolved_signals: stats.resolved,
       wins: stats.wins,

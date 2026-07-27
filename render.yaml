@@ -1,0 +1,103 @@
+# YOLOPulse backend — two services from ONE repo.
+#
+#   bwsb-api     Web Service.        npm start        → dist/server.js
+#                Serves HTTP, reads DB snapshots, holds NO provider keys.
+#   bwsb-worker  Background Worker.  npm run worker   → dist/worker.js
+#                Calls Mindcase + Databento on a schedule, writes snapshots.
+#                This is the ONLY service that needs provider credentials.
+#
+# Secrets are marked sync:false — set their values in the dashboard, never here.
+#
+# DATABASE SCHEMA: owned by Prisma Migrate (bwsb/prisma). Run
+#   npm run db:setup     (= prisma migrate deploy)
+# against the database BEFORE deploying a release that adds or changes a
+# migration. It is not run automatically here so a deploy can never alter the
+# schema on its own. `npm run prisma:status` reports whether the database is up
+# to date.
+
+services:
+  - type: web
+    name: bwsb-api
+    runtime: node
+    rootDir: bwsb
+    plan: starter
+    buildCommand: npm ci && npx prisma generate && npm run build
+    startCommand: npm run start
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: SERVICE_ROLE
+        value: api
+      - key: FRONTEND_ORIGIN
+        sync: false
+      - key: BACKEND_URL
+        sync: false
+      - key: DATABASE_URL
+        sync: false
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+      - key: APP_SESSION_SECRET
+        generateValue: true
+      # NO MINDCASE_* / DATABENTO_* here on purpose: with SERVICE_ROLE=api the
+      # process refuses provider calls, so keys would be dead weight and extra
+      # exposure. The API answers from the worker's snapshots.
+
+  - type: worker
+    name: bwsb-worker
+    runtime: node
+    rootDir: bwsb
+    plan: starter
+    buildCommand: npm ci && npx prisma generate && npm run build
+    startCommand: npm run worker
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: SERVICE_ROLE
+        value: worker
+      - key: DATABASE_URL
+        sync: false
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+
+      # ── Social ingestion (Mindcase) ──────────────────────────────────────
+      - key: SOCIAL_DATA_PROVIDER
+        value: mindcase
+      - key: MINDCASE_API_KEY
+        sync: false
+      - key: MINDCASE_BASE_URL
+        value: https://api.mindcase.co/api/v1
+      - key: MINDCASE_MAX_CONCURRENCY
+        value: "2"
+      - key: MINDCASE_POLL_INTERVAL_MS
+        value: "3000"
+      - key: MINDCASE_MAX_POLLS
+        value: "10"
+      - key: MINDCASE_MAX_RETRIES
+        value: "3"
+      - key: SOCIAL_DATA_REFRESH_SECONDS
+        value: "600"
+      - key: TICKER_STRIP_REFRESH_SECONDS
+        value: "300"
+
+      # ── Market ingestion (Databento) ─────────────────────────────────────
+      - key: MARKET_DATA_PROVIDER
+        value: databento
+      - key: MARKET_DATA_MODE
+        value: delayed
+      - key: MARKET_DATA_DELAY_MINUTES
+        value: "15"
+      - key: MARKET_DATA_REFRESH_SECONDS
+        value: "60"
+      - key: MARKET_MOVERS_REFRESH_SECONDS
+        value: "60"
+      - key: DATABENTO_API_KEY
+        sync: false
+      - key: DATABENTO_DATASET
+        value: EQUS.MINI
+      - key: DATABENTO_OVERNIGHT_DATASET
+        value: OCEA.MEMOIR

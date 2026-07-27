@@ -2,7 +2,7 @@ import { Router } from "express";
 
 import { ok, asyncHandler } from "../lib/response.js";
 import { tickersRepository } from "../repositories/tickers.repository.js";
-import { query } from "../lib/db.js";
+import { postsRepository } from "../repositories/posts.repository.js";
 import { searchCatalog } from "../config/tickerCatalog.js";
 import { TRACKED_SUBREDDITS } from "../services/social/subreddits.js";
 import type { Ticker } from "../types/domain.js";
@@ -94,13 +94,7 @@ searchRouter.get(
 
     let posts: unknown[] = [];
     try {
-      posts = await query(
-        `SELECT reddit_post_id, subreddit, title, score, num_comments, reddit_created_at
-         FROM public.reddit_posts
-         WHERE title ILIKE $1 OR body_excerpt ILIKE $1
-         ORDER BY reddit_created_at DESC NULLS LAST LIMIT 5`,
-        [`%${q}%`],
-      );
+      posts = await postsRepository.search(q, 5);
     } catch (err) {
       // Posts are a bonus surface — never let them break search.
       console.error("Search posts lookup failed:", err);

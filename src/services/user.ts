@@ -1,4 +1,4 @@
-import type { User } from "@prisma/client";
+import type { Users } from "@prisma/client";
 import { prisma } from "../lib/prisma.js";
 import {
   resolveAvatarUrl,
@@ -13,7 +13,7 @@ import {
  */
 export async function upsertUserFromReddit(
   identity: RedditIdentity,
-): Promise<User> {
+): Promise<Users> {
   const redditCreatedAt =
     typeof identity.created_utc === "number"
       ? new Date(identity.created_utc * 1000)
@@ -26,7 +26,7 @@ export async function upsertUserFromReddit(
     redditHasVerifiedEmail: identity.has_verified_email ?? false,
   };
 
-  return prisma.user.upsert({
+  return prisma.users.upsert({
     where: { redditId: identity.id },
     create: { redditId: identity.id, ...profile },
     update: profile,
@@ -34,8 +34,8 @@ export async function upsertUserFromReddit(
 }
 
 /** Fetch a user by local id, or null if not found. */
-export function findUserById(id: string): Promise<User | null> {
-  return prisma.user.findUnique({ where: { id } });
+export function findUserById(id: string): Promise<Users | null> {
+  return prisma.users.findUnique({ where: { id } });
 }
 
 /**
@@ -54,7 +54,7 @@ export interface PublicUser {
   createdAt: string;
 }
 
-export function toPublicUser(user: User): PublicUser {
+export function toPublicUser(user: Users): PublicUser {
   return {
     id: user.id,
     redditId: user.redditId,

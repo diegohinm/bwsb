@@ -1,4 +1,4 @@
-import { query } from "../lib/db.js";
+import { prisma, disconnectPrisma } from "../lib/prisma.js";
 
 /**
  * Expire and clean up stale auth artefacts. Manual/dev:
@@ -18,10 +18,13 @@ import { query } from "../lib/db.js";
  */
 
 /** Run one cleanup step, logging its row count and never throwing. */
-async function step(label: string, sql: string): Promise<void> {
+async function step(
+  label: string,
+  run: () => Promise<{ count: number }>,
+): Promise<void> {
   try {
-    const rows = await query<{ id: string }>(sql + " RETURNING id");
-    console.log(`[tokens:expire] ${label}: ${rows.length}`);
+    const { count } = await run();
+    console.log(`[tokens:expire] ${label}: ${count}`);
   } catch (err) {
     console.error(
       `[tokens:expire] ${label} failed:`,
@@ -31,33 +34,35 @@ async function step(label: string, sql: string): Promise<void> {
 }
 
 async function main(): Promise<void> {
-  await step(
-    "email verification tokens removed",
-    `DELETE FROM public.email_verification_tokens
-      WHERE expires_at < now() OR used_at IS NOT NULL`,
+  const now = new Date();
+
+  await step("email verification tokens removed", () =>
+    prisma.emailVerificationTokens.deleteMany({
+      where: { OR: [{ expiresAt: { lt: now } }, { usedAt: { not: null } }] },
+    }),
   );
 
-  await step(
-    "password reset tokens removed",
-    `DELETE FROM public.password_reset_tokens
-      WHERE expires_at < now() OR used_at IS NOT NULL`,
+  await step("password reset tokens removed", () =>
+    prisma.passwordResetTokens.deleteMany({
+      where: { OR: [{ expiresAt: { lt: now } }, { usedAt: { not: null } }] },
+    }),
   );
 
-  await step(
-    "expired sessions removed",
-    `DELETE FROM public.user_sessions
-      WHERE expires_at < now()`,
+  await step("expired sessions removed", () =>
+    prisma.userSessions.deleteMany({ where: { expiresAt: { lt: now } } }),
   );
 
-  await step(
-    "reddit verification codes expired",
-    `UPDATE public.reddit_verification_requests
-        SET status = 'expired', updated_at = now()
-      WHERE status IN ('pending', 'user_claimed_sent')
-        AND expires_at < now()`,
+  await step("reddit verification codes expired", () =>
+    prisma.redditVerificationRequests.updateMany({
+      where: {
+        status: { in: ["pending", "user_claimed_sent"] },
+        expiresAt: { lt: now },
+      },
+      data: { status: "expired", updatedAt: now },
+    }),
   );
 
   console.log("[tokens:expire] done.");
 }
 
-void main();
+void main().finally(disconnectPrisma);

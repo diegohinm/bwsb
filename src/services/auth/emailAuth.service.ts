@@ -1,4 +1,4 @@
-import { query, queryOne } from "../../lib/db.js";
+import { prisma } from "../../lib/prisma.js";
 import { env } from "../../config/env.js";
 import {
   sendVerificationEmail,
@@ -44,28 +44,26 @@ export async function requestEmailSignup(email: string): Promise<void> {
 
   // Create the user if they don't exist yet (idempotent on email_normalized).
   // New accounts get the global default frog avatar and the email auth_provider.
-  await query(
-    `INSERT INTO public.app_users
-       (email, email_normalized, avatar_url, avatar_type, auth_provider)
-     VALUES ($1, $2, $3, $4, 'email')
-     ON CONFLICT (email_normalized) DO NOTHING`,
-    [raw, normalized, DEFAULT_AVATAR_URL, DEFAULT_AVATAR_TYPE],
-  );
-
-  const user = await queryOne<{ id: string }>(
-    `SELECT id FROM public.app_users WHERE email_normalized = $1`,
-    [normalized],
-  );
-  // Should always exist after the upsert, but stay defensive.
-  if (!user) return;
+  // An empty `update` leaves an existing account completely untouched — signing
+  // up again must never reset someone's avatar or provider.
+  const user = await prisma.appUsers.upsert({
+    where: { emailNormalized: normalized },
+    create: {
+      email: raw,
+      emailNormalized: normalized,
+      avatarUrl: DEFAULT_AVATAR_URL,
+      avatarType: DEFAULT_AVATAR_TYPE,
+      authProvider: "email",
+    },
+    update: {},
+    select: { id: true },
+  });
 
   const rawToken = createRandomToken();
   const expiresAt = new Date(Date.now() + VERIFICATION_TOKEN_TTL_MS);
-  await query(
-    `INSERT INTO public.email_verification_tokens (user_id, token_hash, expires_at)
-     VALUES ($1, $2, $3)`,
-    [user.id, hashToken(rawToken), expiresAt],
-  );
+  await prisma.emailVerificationTokens.create({
+    data: { userId: user.id, tokenHash: hashToken(rawToken), expiresAt },
+  });
 
   const url = `${env.FRONTEND_ORIGIN}/set-password?token=${rawToken}`;
   await sendVerificationEmail(raw, url);
@@ -78,16 +76,18 @@ export async function requestEmailSignup(email: string): Promise<void> {
 export async function verifyEmailToken(
   token: string,
 ): Promise<{ userId: string }> {
-  const row = await queryOne<{ user_id: string }>(
-    `SELECT user_id
-       FROM public.email_verification_tokens
-      WHERE token_hash = $1 AND used_at IS NULL AND expires_at > now()`,
-    [hashToken(token)],
-  );
+  const row = await prisma.emailVerificationTokens.findFirst({
+    where: {
+      tokenHash: hashToken(token),
+      usedAt: null,
+      expiresAt: { gt: new Date() },
+    },
+    select: { userId: true },
+  });
   if (!row) {
     throw new Error("This link is invalid or has expired. Please request a new one.");
   }
-  return { userId: row.user_id };
+  return { userId: row.userId };
 }
 
 /**
@@ -101,37 +101,48 @@ export async function setPasswordAfterVerification(
 ): Promise<{ userId: string }> {
   validatePasswordStrength(password);
 
-  const tokenHash = hashToken(token);
-  const row = await queryOne<{ id: string; user_id: string }>(
-    `SELECT id, user_id
-       FROM public.email_verification_tokens
-      WHERE token_hash = $1 AND used_at IS NULL AND expires_at > now()`,
-    [tokenHash],
-  );
+  const row = await prisma.emailVerificationTokens.findFirst({
+    where: {
+      tokenHash: hashToken(token),
+      usedAt: null,
+      expiresAt: { gt: new Date() },
+    },
+    select: { id: true, userId: true },
+  });
   if (!row) {
     throw new Error("This link is invalid or has expired. Please request a new one.");
   }
 
   const passwordHash = await hashPassword(password);
 
-  await query(
-    `UPDATE public.app_users
-        SET password_hash = $1,
-            email_verified_at = COALESCE(email_verified_at, now()),
-            updated_at = now()
-      WHERE id = $2`,
-    [passwordHash, row.user_id],
-  );
+  // Atomic: a password that is set without its token being burned would leave a
+  // reusable link, and a burned token without a password would lock the user
+  // out of an account they just proved they own.
+  await prisma.$transaction(async (tx) => {
+    const now = new Date();
+    const current = await tx.appUsers.findUnique({
+      where: { id: row.userId },
+      select: { emailVerifiedAt: true },
+    });
 
-  // Burn this token and any other outstanding verification tokens for the user.
-  await query(
-    `UPDATE public.email_verification_tokens
-        SET used_at = now()
-      WHERE user_id = $1 AND used_at IS NULL`,
-    [row.user_id],
-  );
+    await tx.appUsers.update({
+      where: { id: row.userId },
+      data: {
+        passwordHash,
+        // COALESCE: the FIRST verification timestamp is the one that counts.
+        emailVerifiedAt: current?.emailVerifiedAt ?? now,
+        updatedAt: now,
+      },
+    });
 
-  return { userId: row.user_id };
+    // Burn this token and any other outstanding verification tokens for the user.
+    await tx.emailVerificationTokens.updateMany({
+      where: { userId: row.userId, usedAt: null },
+      data: { usedAt: now },
+    });
+  });
+
+  return { userId: row.userId };
 }
 
 /**
@@ -145,23 +156,24 @@ export async function loginWithEmail(
   const normalized = normalizeEmail(email ?? "");
   const genericError = new Error("Invalid email or password");
 
-  const user = await queryOne<{ id: string; password_hash: string | null }>(
-    `SELECT id, password_hash FROM public.app_users WHERE email_normalized = $1`,
-    [normalized],
-  );
+  const user = await prisma.appUsers.findUnique({
+    where: { emailNormalized: normalized },
+    select: { id: true, passwordHash: true },
+  });
 
-  if (!user || !user.password_hash) {
+  if (!user || !user.passwordHash) {
     // Still run a comparison to reduce timing signal, then fail generically.
     await verifyPassword(password ?? "", "$2a$12$0000000000000000000000000000000000000000000000000000");
     throw genericError;
   }
 
-  const ok = await verifyPassword(password ?? "", user.password_hash);
+  const ok = await verifyPassword(password ?? "", user.passwordHash);
   if (!ok) throw genericError;
 
-  await query(`UPDATE public.app_users SET last_login_at = now() WHERE id = $1`, [
-    user.id,
-  ]);
+  await prisma.appUsers.update({
+    where: { id: user.id },
+    data: { lastLoginAt: new Date() },
+  });
 
   return createSession(user.id);
 }
@@ -172,19 +184,17 @@ export async function loginWithEmail(
  */
 export async function requestPasswordReset(email: string): Promise<void> {
   const normalized = normalizeEmail(email ?? "");
-  const user = await queryOne<{ id: string; email: string }>(
-    `SELECT id, email FROM public.app_users WHERE email_normalized = $1`,
-    [normalized],
-  );
+  const user = await prisma.appUsers.findUnique({
+    where: { emailNormalized: normalized },
+    select: { id: true, email: true },
+  });
   if (!user) return; // Silently succeed.
 
   const rawToken = createRandomToken();
   const expiresAt = new Date(Date.now() + RESET_TOKEN_TTL_MS);
-  await query(
-    `INSERT INTO public.password_reset_tokens (user_id, token_hash, expires_at)
-     VALUES ($1, $2, $3)`,
-    [user.id, hashToken(rawToken), expiresAt],
-  );
+  await prisma.passwordResetTokens.create({
+    data: { userId: user.id, tokenHash: hashToken(rawToken), expiresAt },
+  });
 
   const url = `${env.FRONTEND_ORIGIN}/reset-password?token=${rawToken}`;
   await sendPasswordResetEmail(user.email, url);
@@ -200,33 +210,44 @@ export async function resetPassword(
 ): Promise<void> {
   validatePasswordStrength(newPassword);
 
-  const tokenHash = hashToken(token);
-  const row = await queryOne<{ id: string; user_id: string }>(
-    `SELECT id, user_id
-       FROM public.password_reset_tokens
-      WHERE token_hash = $1 AND used_at IS NULL AND expires_at > now()`,
-    [tokenHash],
-  );
+  const row = await prisma.passwordResetTokens.findFirst({
+    where: {
+      tokenHash: hashToken(token),
+      usedAt: null,
+      expiresAt: { gt: new Date() },
+    },
+    select: { id: true, userId: true },
+  });
   if (!row) {
     throw new Error("This reset link is invalid or has expired. Please request a new one.");
   }
 
   const passwordHash = await hashPassword(newPassword);
 
-  await query(
-    `UPDATE public.app_users
-        SET password_hash = $1,
-            email_verified_at = COALESCE(email_verified_at, now()),
-            updated_at = now()
-      WHERE id = $2`,
-    [passwordHash, row.user_id],
-  );
+  // Atomic: the new password, the burnt token and the session revocation must
+  // land together, or a half-applied reset leaves old sessions alive.
+  await prisma.$transaction(async (tx) => {
+    const now = new Date();
+    const current = await tx.appUsers.findUnique({
+      where: { id: row.userId },
+      select: { emailVerifiedAt: true },
+    });
 
-  await query(
-    `UPDATE public.password_reset_tokens SET used_at = now() WHERE id = $1`,
-    [row.id],
-  );
+    await tx.appUsers.update({
+      where: { id: row.userId },
+      data: {
+        passwordHash,
+        emailVerifiedAt: current?.emailVerifiedAt ?? now,
+        updatedAt: now,
+      },
+    });
 
-  // Revoke all active sessions after a password change.
-  await query(`DELETE FROM public.user_sessions WHERE user_id = $1`, [row.user_id]);
+    await tx.passwordResetTokens.update({
+      where: { id: row.id },
+      data: { usedAt: now },
+    });
+
+    // Revoke all active sessions after a password change.
+    await tx.userSessions.deleteMany({ where: { userId: row.userId } });
+  });
 }

@@ -1,57 +1,111 @@
-import { query } from "../lib/db.js";
+import { prisma } from "../lib/prisma.js";
+import { toDbRows } from "../lib/rows.js";
 import type { TickerMention } from "../types/domain.js";
 
-/** Data access for ticker mentions and stance events. */
+/**
+ * Data access for ticker mentions and stance events.
+ *
+ * Rows are returned with their database column names (see lib/rows.ts) because
+ * the ticker/trends routes serialize them straight onto the wire.
+ */
+
+const MENTION_COLUMNS = {
+  id: true,
+  ticker: true,
+  redditPostId: true,
+  pumpLanguageScore: true,
+  narrativeType: true,
+  createdAt: true,
+} as const;
+
 export const mentionsRepository = {
-  forTicker(ticker: string, limit = 100): Promise<TickerMention[]> {
-    return query<TickerMention>(
-      `SELECT m.id, m.ticker, m.reddit_post_id, m.pump_language_score, m.narrative_type, m.created_at
-       FROM public.ticker_mentions m
-       WHERE m.ticker = $1
-       ORDER BY m.created_at DESC
-       LIMIT $2`,
-      [ticker, limit],
-    );
+  async forTicker(ticker: string, limit = 100): Promise<TickerMention[]> {
+    const rows = await prisma.tickerMentions.findMany({
+      where: { ticker },
+      select: MENTION_COLUMNS,
+      orderBy: { createdAt: "desc" },
+      take: limit,
+    });
+    return toDbRows<TickerMention>("TickerMentions", rows);
   },
 
-  withPostForTicker(ticker: string, limit = 100) {
-    return query(
-      `SELECT m.id, m.ticker, m.reddit_post_id, m.pump_language_score, m.narrative_type, m.created_at,
-              p.title, p.subreddit, p.score, p.num_comments, p.permalink, p.reddit_created_at
-       FROM public.ticker_mentions m
-       JOIN public.reddit_posts p ON p.reddit_post_id = m.reddit_post_id
-       WHERE m.ticker = $1
-       ORDER BY m.created_at DESC
-       LIMIT $2`,
-      [ticker, limit],
-    );
+  /** Mentions joined to the post they came from (the JOIN is an inner one). */
+  async withPostForTicker(ticker: string, limit = 100) {
+    const rows = await prisma.tickerMentions.findMany({
+      where: { ticker },
+      select: {
+        ...MENTION_COLUMNS,
+        redditPosts: {
+          select: {
+            title: true,
+            subreddit: true,
+            score: true,
+            numComments: true,
+            permalink: true,
+            redditCreatedAt: true,
+          },
+        },
+      },
+      orderBy: { createdAt: "desc" },
+      take: limit,
+    });
+
+    return rows.map(({ redditPosts, ...mention }) => ({
+      ...toDbRows<Record<string, unknown>>("TickerMentions", [mention])[0],
+      ...toDbRows<Record<string, unknown>>("RedditPosts", [redditPosts])[0],
+    }));
   },
 
-  stanceForTicker(ticker: string) {
-    return query(
-      `SELECT ticker, subreddit, stance, confidence, matched_terms, created_at
-       FROM public.ticker_stance_events WHERE ticker = $1 ORDER BY created_at DESC`,
-      [ticker],
-    );
+  async stanceForTicker(ticker: string) {
+    const rows = await prisma.tickerStanceEvents.findMany({
+      where: { ticker },
+      select: {
+        ticker: true,
+        subreddit: true,
+        stance: true,
+        confidence: true,
+        matchedTerms: true,
+        createdAt: true,
+      },
+      orderBy: { createdAt: "desc" },
+    });
+    return toDbRows("TickerStanceEvents", rows);
   },
 
-  stanceSplit(ticker: string) {
-    return query(
-      `SELECT stance, count(*)::int AS n
-       FROM public.ticker_stance_events WHERE ticker = $1 GROUP BY stance`,
-      [ticker],
-    );
+  async stanceSplit(ticker: string): Promise<{ stance: string; n: number }[]> {
+    const groups = await prisma.tickerStanceEvents.groupBy({
+      by: ["stance"],
+      where: { ticker },
+      _count: { _all: true },
+    });
+    return groups.map((g) => ({ stance: g.stance, n: g._count._all }));
   },
 
   /** Divergence of stance across subreddits for a ticker. */
-  stanceBySubreddit(ticker: string) {
-    return query(
-      `SELECT subreddit,
-              count(*) FILTER (WHERE stance='bullish')::int AS bullish,
-              count(*) FILTER (WHERE stance='bearish')::int AS bearish,
-              count(*) FILTER (WHERE stance='neutral')::int AS neutral
-       FROM public.ticker_stance_events WHERE ticker = $1 GROUP BY subreddit`,
-      [ticker],
-    );
+  async stanceBySubreddit(ticker: string) {
+    // `count(*) FILTER (WHERE stance = …)` has no Prisma equivalent, so group by
+    // both columns and pivot stance into one row per subreddit here.
+    const groups = await prisma.tickerStanceEvents.groupBy({
+      by: ["subreddit", "stance"],
+      where: { ticker },
+      _count: { _all: true },
+    });
+
+    const bySubreddit = new Map<
+      string | null,
+      { subreddit: string | null; bullish: number; bearish: number; neutral: number }
+    >();
+
+    for (const g of groups) {
+      const row =
+        bySubreddit.get(g.subreddit) ??
+        { subreddit: g.subreddit, bullish: 0, bearish: 0, neutral: 0 };
+      if (g.stance === "bullish") row.bullish += g._count._all;
+      else if (g.stance === "bearish") row.bearish += g._count._all;
+      else if (g.stance === "neutral") row.neutral += g._count._all;
+      bySubreddit.set(g.subreddit, row);
+    }
+
+    return [...bySubreddit.values()];
   },
 };

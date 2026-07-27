@@ -1,4 +1,4 @@
-import { query } from "../../lib/db.js";
+import { prisma } from "../../lib/prisma.js";
 
 /**
  * Append-only audit trail for auth-related actions. Best-effort: a logging
@@ -16,19 +16,16 @@ export interface AuthEventInput {
 
 export async function logAuthEvent(event: AuthEventInput): Promise<void> {
   try {
-    await query(
-      `INSERT INTO public.auth_events
-         (user_id, event_type, success, ip_address, user_agent, error_message)
-       VALUES ($1, $2, $3, $4, $5, $6)`,
-      [
-        event.userId ?? null,
-        event.eventType,
-        event.success,
-        event.ipAddress ?? null,
-        event.userAgent ?? null,
-        event.errorMessage ?? null,
-      ],
-    );
+    await prisma.authEvents.create({
+      data: {
+        userId: event.userId ?? null,
+        eventType: event.eventType,
+        success: event.success,
+        ipAddress: event.ipAddress ?? null,
+        userAgent: event.userAgent ?? null,
+        errorMessage: event.errorMessage ?? null,
+      },
+    });
   } catch (err) {
     console.error("Failed to record auth event (continuing):", err);
   }

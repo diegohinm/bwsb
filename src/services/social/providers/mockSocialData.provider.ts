@@ -4,7 +4,7 @@ import {
   assembleTickerFeed,
   type ResponseMeta,
 } from "../socialData.assemble.js";
-import type { SocialDataProvider } from "../socialData.provider.js";
+import type { SocialDataProvider, SocialItemsResult } from "../socialData.provider.js";
 import type {
   PulseTimeframe,
   SocialContentType,
@@ -54,6 +54,23 @@ export class MockSocialDataProvider implements SocialDataProvider {
   }): Promise<TickerSocialFeedResponse> {
     const items = buildMockItems(params.timeframe);
     return assembleTickerFeed(items, params, this.meta());
+  }
+
+  /** Demo items for the ingestion worker — no network, nothing can fail. */
+  async fetchItems(params: {
+    subreddits?: string[];
+    timeframe?: PulseTimeframe;
+  }): Promise<SocialItemsResult> {
+    const items = buildMockItems(params.timeframe ?? "24h");
+    const scoped = params.subreddits?.length
+      ? items.filter((i) => params.subreddits!.includes(i.subreddit))
+      : items;
+    return {
+      items: scoped,
+      failed: [],
+      rateLimited: false,
+      attempted: params.subreddits?.length ?? 0,
+    };
   }
 
   private meta(warning?: string): ResponseMeta {

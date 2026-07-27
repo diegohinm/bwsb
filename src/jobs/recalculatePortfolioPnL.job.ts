@@ -1,13 +1,16 @@
-import { query } from "../lib/db.js";
+import { Prisma } from "@prisma/client";
+
+import { prisma, disconnectPrisma } from "../lib/prisma.js";
 import { virtualRepository } from "../repositories/virtual.repository.js";
-import { getQuotes } from "../services/market-data/marketData.service.js";
+import { getStoredQuotes } from "../services/market-data/marketRead.service.js";
 
 /**
- * Recompute virtual-portfolio valuations from live market quotes. Manual/dev.
+ * Recompute virtual-portfolio valuations from the latest ingested quotes.
  *   npm run portfolio:recalculate
  *
- * Never hardcodes prices — every position is revalued through the market-data
- * service (which falls back to mock). Must not crash on provider OR db failure.
+ * Reads `market_quotes_latest` (worker output) rather than calling a provider,
+ * so it behaves identically in the API and worker processes. Never hardcodes
+ * prices; must not crash on a missing quote or a db failure.
  */
 
 const n = (v: unknown): number => {
@@ -16,11 +19,11 @@ const n = (v: unknown): number => {
 };
 
 async function main(): Promise<void> {
-  let accounts: Array<{ id: string; cash_balance: number | string }> = [];
+  let accounts: Array<{ id: string; cashBalance: Prisma.Decimal }> = [];
   try {
-    accounts = await query<{ id: string; cash_balance: number | string }>(
-      `SELECT id, cash_balance FROM public.virtual_accounts`,
-    );
+    accounts = await prisma.virtualAccounts.findMany({
+      select: { id: true, cashBalance: true },
+    });
   } catch (err) {
     console.error("[portfolio:recalculate] cannot read accounts:", err instanceof Error ? err.message : err);
     return;
@@ -31,13 +34,18 @@ async function main(): Promise<void> {
       const positions = await virtualRepository.listPositions(account.id);
       if (positions.length === 0) continue;
 
-      const symbols = [...new Set(positions.map((p) => p.ticker.toUpperCase()))];
-      const quotes = await getQuotes(symbols);
+      // ticker is nullable on the column; a position without one simply has no
+      // quote to look up and falls back to its average cost.
+      const symbol = (p: { ticker: string | null }): string =>
+        (p.ticker ?? "").toUpperCase();
+
+      const symbols = [...new Set(positions.map(symbol))].filter(Boolean);
+      const quotes = await getStoredQuotes(symbols);
       const priceBySymbol = new Map(quotes.map((q) => [q.symbol.toUpperCase(), q.price ?? 0]));
 
       let positionsValue = 0;
       for (const p of positions) {
-        const price = priceBySymbol.get(p.ticker.toUpperCase()) ?? n(p.avg_cost);
+        const price = priceBySymbol.get(symbol(p)) ?? n(p.avg_cost);
         const mult = p.instrument === "option" ? 100 : 1;
         const qty = n(p.quantity);
         const marketValue = qty * price * mult;
@@ -50,10 +58,10 @@ async function main(): Promise<void> {
         );
       }
 
-      const equityValue = n(account.cash_balance) + positionsValue;
+      const equityValue = n(account.cashBalance) + positionsValue;
       await virtualRepository.updateBalances(
         account.id,
-        n(account.cash_balance),
+        n(account.cashBalance),
         Math.round(equityValue * 100) / 100,
       );
       const mock = quotes[0]?.isMock ? " (mock quotes)" : "";
@@ -69,4 +77,4 @@ async function main(): Promise<void> {
   }
 }
 
-void main();
+void main().finally(disconnectPrisma);
