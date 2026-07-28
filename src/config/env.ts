@@ -193,6 +193,23 @@ const envSchema = z.object({
     .enum(["mock", "delayed", "realtime", "end_of_day"])
     .default("delayed"),
   MARKET_DATA_CACHE_TTL_SECONDS: z.coerce.number().int().positive().default(10),
+
+  /**
+   * Master switch for EXTENDED-HOURS support: premarket, after-hours and the
+   * overnight session.
+   *
+   * Defaults to FALSE — the product then works exclusively with the US regular
+   * session, 09:30–16:00 America/New_York. With the flag off:
+   *   - the worker never requests overnight/extended data from Databento;
+   *   - extended-hours changes are not computed;
+   *   - premarket / after-hours / overnight snapshots are not persisted;
+   *   - reads only serve session="regular" rows, and outside market hours the
+   *     last regular-session close is returned, clearly labeled as such.
+   *
+   * The implementation is NOT deleted — it stays behind this flag. Setting it
+   * back to true restores every extended-hours path.
+   */
+  ENABLE_EXTENDED_HOURS: boolFromString(false),
   /**
    * How far behind real-time the published market data is, in minutes. Shown in
    * the UI ("Delayed 15m") and stored on every worker-written quote/mover row.
@@ -285,6 +302,15 @@ export const env = {
 };
 
 export const isProduction = env.NODE_ENV === "production";
+
+/**
+ * Whether premarket / after-hours / overnight are available at all.
+ *
+ * Read this instead of `env.ENABLE_EXTENDED_HOURS` so every consumer shares one
+ * name, and so the flag can later gain extra conditions (a license check, say)
+ * in exactly one place.
+ */
+export const extendedHoursEnabled: boolean = env.ENABLE_EXTENDED_HOURS;
 
 /**
  * Demo/development seed content may only be written when it was explicitly

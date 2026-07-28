@@ -93,7 +93,9 @@ app.use("/api", searchRouter);
 // Public cross-subreddit Pulse (social data provider, no auth).
 app.use("/api", pulseRouter);
 app.use("/api", dashboardRouter);
-// Public market data (equities / extended-hours / options; license-gated, no auth).
+// Public market data (equities / options; license-gated, no auth). Extended
+// hours are served only when ENABLE_EXTENDED_HOURS is on — off by default,
+// in which case this is the US regular session (09:30-16:00 ET) only.
 app.use("/api", marketDataRouter);
 app.use("/api", productRouter);
 // Optional Reddit username verification (requireAuth applied inside the router).

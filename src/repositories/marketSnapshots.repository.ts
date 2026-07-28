@@ -1,9 +1,11 @@
 import { prisma } from "../lib/prisma.js";
 import { num } from "../lib/numeric.js";
-import type {
-  MarketDataDisplayMode,
-  MarketQuote,
-  MarketSession,
+import { extendedHoursEnabled } from "../config/env.js";
+import {
+  isExtendedHoursSession,
+  type MarketDataDisplayMode,
+  type MarketQuote,
+  type MarketSession,
 } from "../services/market-data/marketData.types.js";
 
 /**
@@ -16,7 +18,22 @@ import type {
  * every read also returns `observedAt`/`snapshotAt` and the row's own provenance
  * (provider / source / displayMode / delayMinutes / isMock) — a stale snapshot
  * is visible as stale rather than silently presented as current.
+ *
+ * EXTENDED HOURS: when ENABLE_EXTENDED_HOURS is off, every write path drops rows
+ * whose session is premarket / after_hours / overnight. The guard lives here, at
+ * the persistence boundary, so no caller can bypass it. Rows already in the
+ * database are left untouched — this filters new writes, it never deletes
+ * history.
  */
+
+/**
+ * Rows for a session the product does not currently expose. Dropped on write.
+ * Returns everything unchanged once the flag is on.
+ */
+function withoutExtendedHours<T extends { session: MarketSession }>(rows: T[]): T[] {
+  if (extendedHoursEnabled) return rows;
+  return rows.filter((r) => !isExtendedHoursSession(r.session));
+}
 
 // ── Worker writes ────────────────────────────────────────────────────────────
 
@@ -62,17 +79,20 @@ export async function saveQuotesIfChanged(
   quotes: QuoteSnapshotInput[],
 ): Promise<SaveQuotesResult> {
   const result: SaveQuotesResult = { updated: [], unchanged: [] };
-  if (quotes.length === 0) return result;
+  // Filter first: an extended-hours bar must not even count as "unchanged", or
+  // it would refresh updated_at and make a stale regular close look re-confirmed.
+  const candidates = withoutExtendedHours(quotes);
+  if (candidates.length === 0) return result;
 
   const existing = new Map(
-    (await readLatestQuotes(quotes.map((q) => q.symbol))).map((q) => [
+    (await readLatestQuotes(candidates.map((q) => q.symbol))).map((q) => [
       q.symbol.toUpperCase(),
       q,
     ]),
   );
 
   const changed: QuoteSnapshotInput[] = [];
-  for (const q of quotes) {
+  for (const q of candidates) {
     const prior = existing.get(q.symbol.toUpperCase());
     const sameBar =
       prior != null &&
@@ -118,9 +138,12 @@ function quoteColumns(q: QuoteSnapshotInput) {
 }
 
 export async function saveQuotes(quotes: QuoteSnapshotInput[]): Promise<number> {
-  if (quotes.length === 0) return 0;
+  // Extended-hours bars never reach the table while the flag is off, so the
+  // stored "latest" stays the last REGULAR-session quote.
+  const writable = withoutExtendedHours(quotes);
+  if (writable.length === 0) return 0;
 
-  for (const q of quotes) {
+  for (const q of writable) {
     const columns = quoteColumns(q);
     const now = new Date();
 
@@ -138,7 +161,7 @@ export async function saveQuotes(quotes: QuoteSnapshotInput[]): Promise<number> 
     ]);
   }
 
-  return quotes.length;
+  return writable.length;
 }
 
 export interface MoverSnapshotInput {
@@ -160,10 +183,11 @@ export async function saveMoversSnapshot(
   movers: MoverSnapshotInput[],
   snapshotAt: string,
 ): Promise<number> {
-  if (movers.length === 0) return 0;
+  const writable = withoutExtendedHours(movers);
+  if (writable.length === 0) return 0;
 
   const created = await prisma.marketMoversSnapshots.createMany({
-    data: movers.map((m) => ({
+    data: writable.map((m) => ({
       session: m.session,
       symbol: m.symbol.toUpperCase(),
       price: m.price,

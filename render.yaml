@@ -41,6 +41,10 @@ services:
         sync: false
       - key: APP_SESSION_SECRET
         generateValue: true
+      # Must match the worker's value: this side decides which sessions the API
+      # will serve and which ?session= values it rejects.
+      - key: ENABLE_EXTENDED_HOURS
+        value: "false"
       # NO MINDCASE_* / DATABENTO_* here on purpose: with SERVICE_ROLE=api the
       # process refuses provider calls, so keys would be dead weight and extra
       # exposure. The API answers from the worker's snapshots.
@@ -91,6 +95,10 @@ services:
         value: delayed
       - key: MARKET_DATA_DELAY_MINUTES
         value: "15"
+      # Regular session only (09:30-16:00 ET). Set to "true" to re-enable
+      # premarket / after-hours / overnight — the code is kept behind this flag.
+      - key: ENABLE_EXTENDED_HOURS
+        value: "false"
       - key: MARKET_DATA_REFRESH_SECONDS
         value: "60"
       - key: MARKET_MOVERS_REFRESH_SECONDS

@@ -1,7 +1,8 @@
-import { env } from "../../config/env.js";
+import { env, extendedHoursEnabled } from "../../config/env.js";
 import { memoryCache } from "../cache/memoryCache.js";
 import { getMarketDataProvider, mockMarketDataProvider } from "./marketDataProvider.factory.js";
-import { currentSession, round2 } from "./marketData.util.js";
+import { currentSession, isRegularSession, round2 } from "./marketData.util.js";
+import { isExtendedHoursSession } from "./marketData.types.js";
 import type {
   CandleTimeframe,
   MarketCandle,
@@ -34,10 +35,13 @@ const PUBLIC_REALTIME = false;
 const PUBLIC_OPTIONS_REALTIME = false;
 export const realtimeEnabled = PUBLIC_REALTIME && env.MARKET_DATA_MODE === "realtime";
 export const optionsRealtimeEnabled = PUBLIC_OPTIONS_REALTIME;
-// Overnight support is provided by the Databento overnight dataset. It is
-// "enabled" (attempted from the real provider) whenever Databento is configured;
-// if the overnight feed is unavailable the service serves demo data + a warning.
-export const overnightEnabled = env.MARKET_DATA_PROVIDER === "databento";
+// Overnight support is provided by the Databento overnight dataset. It requires
+// BOTH the extended-hours feature flag and a configured Databento provider — the
+// flag alone decides whether the overnight dataset is ever requested at all.
+// With ENABLE_EXTENDED_HOURS=false this is permanently false, no overnight
+// dataset call is made, and the status payload reports the capability as off.
+export const overnightEnabled =
+  extendedHoursEnabled && env.MARKET_DATA_PROVIDER === "databento";
 
 const WARN_DELAYED = "Market data is delayed (safe mode), not real-time.";
 const WARN_OPTIONS = "Options data is delayed/EOD, not real-time.";
@@ -246,6 +250,11 @@ export interface DelayedQuoteIngestion {
   delayMinutes: number;
   /** How far the provider's historical data reaches, when known. */
   availableEnd: string | null;
+  /**
+   * Bars discarded because they printed outside 09:30–16:00 ET while
+   * ENABLE_EXTENDED_HOURS was off. Always 0 when the flag is on.
+   */
+  extendedHoursBarsDropped: number;
   /** Real age of the newest returned bar, in minutes. Null when none. */
   barAgeMinutes: number | null;
 }
@@ -293,7 +302,18 @@ export async function getDelayedQuotesForIngestion(
   let newestBarMs: number | null = null;
 
   const quotes: MarketQuote[] = [];
+  let extendedHoursBarsDropped = 0;
+
   for (const [symbol, bar] of bars.latestBySymbol) {
+    // The equities dataset can return bars printed outside 09:30–16:00 ET. With
+    // extended hours disabled those are not ours to publish: drop them here so
+    // the stored "latest" stays the last REGULAR-session bar rather than being
+    // overwritten by an after-hours print stamped "closed".
+    if (!extendedHoursEnabled && !isRegularSession(new Date(bar.observedAt))) {
+      extendedHoursBarsDropped += 1;
+      continue;
+    }
+
     const previousClose = previousCloses.get(symbol) ?? null;
     const price = bar.close;
     const change = price != null && previousClose != null ? round2(price - previousClose) : null;
@@ -349,6 +369,7 @@ export async function getDelayedQuotesForIngestion(
     marketOpen,
     delayMinutes,
     availableEnd: bars.availableEnd ?? null,
+    extendedHoursBarsDropped,
     barAgeMinutes:
       newestBarMs === null ? null : Math.max(0, Math.round((nowMs - newestBarMs) / 60_000)),
   };
@@ -364,7 +385,11 @@ export async function getCandles(params: {
   session?: MarketSession | "all";
 }): Promise<MarketCandle[]> {
   const sym = params.symbol.toUpperCase();
-  const session = params.session ?? "all";
+  const requestedSession = params.session ?? "all";
+  // Coerced so an ?session=overnight candle request cannot reach the overnight
+  // Databento dataset while the flag is off.
+  const session =
+    requestedSession === "all" ? "all" : providerSession(requestedSession);
   const key = `candles:${env.MARKET_DATA_PROVIDER}:${sym}:${params.timeframe}:${params.from}:${params.to}:${session}`;
   const cached = memoryCache.get<MarketCandle[]>(key);
   if (cached) return cached;
@@ -461,11 +486,25 @@ function buildMoversResponse(args: {
   };
 }
 
+/**
+ * The session a provider call may actually use.
+ *
+ * With ENABLE_EXTENDED_HOURS off, any premarket/after-hours/overnight request is
+ * served as "regular" instead. This is the single point that stops the overnight
+ * Databento dataset from ever being requested.
+ */
+function providerSession(session: MarketSession): MarketSession {
+  if (extendedHoursEnabled) return session;
+  return isExtendedHoursSession(session) ? "regular" : session;
+}
+
 export async function getMarketMovers(params: {
   session: MarketSession | "all";
   limit?: number;
 }): Promise<MarketMoversResponse> {
-  const session: MarketSession = params.session === "all" ? currentSession() : params.session;
+  const session: MarketSession = providerSession(
+    params.session === "all" ? currentSession() : params.session,
+  );
   const limit = params.limit ?? 10;
   const key = `movers:${env.MARKET_DATA_PROVIDER}:${session}:${limit}`;
   const cached = memoryCache.get<MarketMoversResponse>(key);

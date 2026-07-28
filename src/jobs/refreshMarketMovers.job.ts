@@ -13,10 +13,14 @@ import type { MarketDataDisplayMode } from "../services/market-data/marketData.t
 /**
  * WORKER JOB — market movers.
  *
- * Snapshots the top movers for every session (regular / premarket / after_hours
- * / overnight) into `market_movers_snapshots`. Overnight comes from the
- * Databento overnight dataset when configured; the API then serves the newest
- * snapshot per session without touching Databento.
+ * Snapshots the top movers for each session in WORKER_MOVER_SESSIONS into
+ * `market_movers_snapshots`; the API then serves the newest snapshot per session
+ * without touching Databento.
+ *
+ * EXTENDED HOURS: with ENABLE_EXTENDED_HOURS off, WORKER_MOVER_SESSIONS is
+ * `["regular"]` — this job then makes ONE provider call per tick instead of
+ * four, and never requests the Databento overnight dataset. Turning the flag on
+ * restores the premarket / after_hours / overnight passes.
  *
  * Demo rows are written ONLY when demo is the configured mode. If a real
  * provider fails, the previous snapshot is left in place (the API keeps serving

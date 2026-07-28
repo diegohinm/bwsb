@@ -30,6 +30,7 @@ export type AssetType = "equity" | "etf" | "option" | "crypto" | "index" | "unkn
 export const CANDLE_TIMEFRAMES = ["1m", "5m", "15m", "1h", "1d"] as const;
 export type CandleTimeframe = (typeof CANDLE_TIMEFRAMES)[number];
 
+/** Every session the type system knows about. Not necessarily all available. */
 export const MARKET_SESSIONS: MarketSession[] = [
   "premarket",
   "regular",
@@ -37,6 +38,17 @@ export const MARKET_SESSIONS: MarketSession[] = [
   "overnight",
   "closed",
 ];
+
+/** The sessions that only exist when ENABLE_EXTENDED_HOURS is on. */
+export const EXTENDED_HOURS_SESSIONS: MarketSession[] = [
+  "premarket",
+  "after_hours",
+  "overnight",
+];
+
+export function isExtendedHoursSession(session: MarketSession): boolean {
+  return EXTENDED_HOURS_SESSIONS.includes(session);
+}
 
 export interface MarketDataProviderStatus {
   provider: MarketDataProviderName;

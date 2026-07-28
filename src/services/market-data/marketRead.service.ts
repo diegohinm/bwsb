@@ -1,16 +1,17 @@
-import { env } from "../../config/env.js";
+import { env, extendedHoursEnabled } from "../../config/env.js";
 import {
   readLatestMovers,
   readLatestQuotes,
   type StoredQuote,
 } from "../../repositories/marketSnapshots.repository.js";
 import { mockMarketDataProvider } from "./marketDataProvider.factory.js";
-import { currentSession } from "./marketData.util.js";
+import { currentSession, isRegularSession } from "./marketData.util.js";
 import { overnightEnabled, type MarketMoversResponse } from "./marketData.service.js";
-import type {
-  MarketDataDisplayMode,
-  MarketQuote,
-  MarketSession,
+import {
+  isExtendedHoursSession,
+  type MarketDataDisplayMode,
+  type MarketQuote,
+  type MarketSession,
 } from "./marketData.types.js";
 
 /**
@@ -33,6 +34,9 @@ const WARN_NOT_INGESTED =
   "Not published by the ingestion worker yet. Showing demo data.";
 const WARN_PARTIAL =
   "Some symbols have not been published by the ingestion worker yet. Those rows show demo data.";
+/** Shown whenever a stored row is served outside 09:30–16:00 ET. */
+const WARN_LAST_CLOSE =
+  "Last regular-session close (09:30–16:00 ET). Not a live quote.";
 
 /** Delay label applied to everything the API serves. */
 export const DELAY_MINUTES = env.MARKET_DATA_DELAY_MINUTES;
@@ -47,18 +51,48 @@ export interface ApiMarketQuote extends MarketQuote {
   storedAt: string | null;
   /** Publication delay in minutes — drives the "Delayed 15m" badge. */
   delayMinutes: number | null;
+  /**
+   * True when this price is the last REGULAR-session close rather than a quote
+   * from a currently-open market. The UI must label it and must not present it
+   * as live.
+   */
+  isLastRegularClose: boolean;
 }
 
-function fromStored(q: StoredQuote): ApiMarketQuote {
+/**
+ * Never let a stored session value the product no longer exposes reach a
+ * response. Legacy rows written before ENABLE_EXTENDED_HOURS was introduced can
+ * still say "after_hours"; they are reported as "closed" instead of leaking a
+ * session the client has no UI for. The row itself is left untouched in the DB.
+ */
+function safeSession(session: MarketSession): MarketSession {
+  if (extendedHoursEnabled) return session;
+  return isExtendedHoursSession(session) ? "closed" : session;
+}
+
+function fromStored(q: StoredQuote, marketOpen: boolean): ApiMarketQuote {
   const displayMode = safeMode(q.displayMode);
+  const session = safeSession(q.session);
+  // Outside 09:30–16:00 ET nothing stored can be a live quote: it is by
+  // definition the last close we captured while the market was open.
+  const isLastRegularClose = !marketOpen || session !== "regular";
+
+  const delayWarning =
+    displayMode === "delayed"
+      ? `Market data is delayed by ${q.delayMinutes ?? DELAY_MINUTES} minutes, not real-time.`
+      : undefined;
+  // The last-close caveat outranks the delay caveat: it is the stronger claim
+  // about what the number actually is.
+  const warning = isLastRegularClose ? WARN_LAST_CLOSE : delayWarning;
+
   return {
     ...q,
+    session,
     displayMode,
     isDelayed: displayMode !== "realtime",
     delayMinutes: q.delayMinutes ?? DELAY_MINUTES,
-    ...(displayMode === "delayed"
-      ? { warning: `Market data is delayed by ${q.delayMinutes ?? DELAY_MINUTES} minutes, not real-time.` }
-      : {}),
+    isLastRegularClose,
+    ...(warning ? { warning } : {}),
   };
 }
 
@@ -67,11 +101,13 @@ async function demoQuote(symbol: string): Promise<ApiMarketQuote> {
   const q = await mockMarketDataProvider.getQuote(symbol);
   return {
     ...q,
+    session: safeSession(q.session),
     displayMode: "mock",
     isMock: true,
     isDelayed: true,
     delayMinutes: null,
     storedAt: null,
+    isLastRegularClose: false,
     warning: WARN_NOT_INGESTED,
   };
 }
@@ -80,7 +116,10 @@ async function demoQuote(symbol: string): Promise<ApiMarketQuote> {
 export async function getStoredQuotes(symbols: string[]): Promise<ApiMarketQuote[]> {
   const syms = symbols.map((s) => s.toUpperCase());
   const stored = await readLatestQuotes(syms);
-  const bySymbol = new Map(stored.map((q) => [q.symbol.toUpperCase(), fromStored(q)]));
+  const marketOpen = isRegularSession();
+  const bySymbol = new Map(
+    stored.map((q) => [q.symbol.toUpperCase(), fromStored(q, marketOpen)]),
+  );
 
   const out: ApiMarketQuote[] = [];
   for (const sym of syms) {
@@ -108,8 +147,16 @@ export async function getStoredMovers(params: {
   session: MarketSession | "all";
   limit?: number;
 }): Promise<MarketMoversResponse> {
-  const session: MarketSession =
+  const requested: MarketSession =
     params.session === "all" ? currentSession() : params.session;
+
+  // With extended hours off, movers are a REGULAR-session concept only. Outside
+  // market hours `currentSession()` yields "closed", for which no snapshot is
+  // ever written, so the read is pinned to the last regular-session batch —
+  // which is what "most recent regular session" means for a closed market.
+  const session: MarketSession = extendedHoursEnabled
+    ? requested
+    : "regular";
   const limit = params.limit ?? 10;
 
   const snapshot = await readLatestMovers(session, limit);

@@ -1,3 +1,4 @@
+import { extendedHoursEnabled } from "./env.js";
 import type { MarketSession } from "../services/market-data/marketData.types.js";
 
 /**
@@ -27,13 +28,16 @@ export const WORKER_MARKET_SYMBOLS: readonly string[] = [
   "POET",
 ];
 
-/** Sessions the movers job snapshots on every run. */
-export const WORKER_MOVER_SESSIONS: readonly MarketSession[] = [
-  "regular",
-  "premarket",
-  "after_hours",
-  "overnight",
-];
+/**
+ * Sessions the movers job snapshots on every run.
+ *
+ * With ENABLE_EXTENDED_HOURS off this is REGULAR ONLY: the job then makes one
+ * provider call per run instead of four, and no premarket/after-hours/overnight
+ * snapshot is ever written.
+ */
+export const WORKER_MOVER_SESSIONS: readonly MarketSession[] = extendedHoursEnabled
+  ? ["regular", "premarket", "after_hours", "overnight"]
+  : ["regular"];
 
 /** Timeframes the worker precomputes pulse + trending snapshots for. */
 export const WORKER_PULSE_TIMEFRAMES = ["1h", "6h", "24h", "7d"] as const;

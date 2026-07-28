@@ -1,3 +1,4 @@
+import { extendedHoursEnabled } from "../../config/env.js";
 import type { MarketSession } from "./marketData.types.js";
 
 /**
@@ -22,30 +23,63 @@ export const randInt = (seed: string, min: number, max: number) =>
 export const round2 = (v: number) => Math.round(v * 100) / 100;
 export const clamp = (v: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, v));
 
+/** US regular trading hours, in minutes past midnight ET. */
+const REGULAR_OPEN = 9 * 60 + 30; // 09:30
+const REGULAR_CLOSE = 16 * 60; // 16:00
+const PREMARKET_OPEN = 4 * 60; // 04:00
+const AFTER_HOURS_END = 20 * 60; // 20:00
+
+/** Wall-clock position in America/New_York, without pulling in a tz library. */
+function easternClock(now: Date): { day: number; minutes: number } {
+  const et = new Date(now.toLocaleString("en-US", { timeZone: "America/New_York" }));
+  return {
+    day: et.getDay(), // 0 = Sun, 6 = Sat
+    minutes: et.getHours() * 60 + et.getMinutes(),
+  };
+}
+
 /**
- * Current US market session from the wall clock, using US/Eastern.
+ * True when the instant falls inside the US REGULAR session:
+ * 09:30–16:00 America/New_York on a weekday.
+ *
+ * Weekday-only and holiday-unaware, exactly as before — a market holiday simply
+ * produces no bars, and the "no data" path already handles that.
+ */
+export function isRegularSession(now: Date = new Date()): boolean {
+  const { day, minutes } = easternClock(now);
+  if (day === 0 || day === 6) return false;
+  return minutes >= REGULAR_OPEN && minutes < REGULAR_CLOSE;
+}
+
+/**
+ * The full five-session breakdown. PRESERVED but only reachable when
+ * ENABLE_EXTENDED_HOURS is on — `currentSession` is the gate.
+ *
  *   premarket    04:00–09:30 ET (weekday)
  *   regular      09:30–16:00 ET (weekday)
  *   after_hours  16:00–20:00 ET (weekday)
  *   overnight    20:00–04:00 ET (weekday nights)
  *   closed       weekends
  */
-export function currentSession(now: Date = new Date()): MarketSession {
-  // Convert to ET without pulling in a tz library.
-  const et = new Date(now.toLocaleString("en-US", { timeZone: "America/New_York" }));
-  const day = et.getDay(); // 0 = Sun, 6 = Sat
-  const minutes = et.getHours() * 60 + et.getMinutes();
+export function extendedSession(now: Date = new Date()): MarketSession {
+  const { day, minutes } = easternClock(now);
+  if (day === 0 || day === 6) return "closed";
 
-  const isWeekend = day === 0 || day === 6;
-  if (isWeekend) return "closed";
-
-  const OPEN = 9 * 60 + 30;
-  const CLOSE = 16 * 60;
-  const PRE = 4 * 60;
-  const AH_END = 20 * 60;
-
-  if (minutes >= PRE && minutes < OPEN) return "premarket";
-  if (minutes >= OPEN && minutes < CLOSE) return "regular";
-  if (minutes >= CLOSE && minutes < AH_END) return "after_hours";
+  if (minutes >= PREMARKET_OPEN && minutes < REGULAR_OPEN) return "premarket";
+  if (minutes >= REGULAR_OPEN && minutes < REGULAR_CLOSE) return "regular";
+  if (minutes >= REGULAR_CLOSE && minutes < AFTER_HOURS_END) return "after_hours";
   return "overnight";
+}
+
+/**
+ * The session an instant belongs to, as the product is configured.
+ *
+ * With ENABLE_EXTENDED_HOURS off this collapses to the only two states the
+ * product recognises — "regular" inside 09:30–16:00 ET, "closed" otherwise —
+ * so no premarket/after-hours/overnight value can reach a response, a snapshot
+ * row or a cache key.
+ */
+export function currentSession(now: Date = new Date()): MarketSession {
+  if (!extendedHoursEnabled) return isRegularSession(now) ? "regular" : "closed";
+  return extendedSession(now);
 }
