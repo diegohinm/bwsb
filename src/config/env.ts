@@ -162,6 +162,22 @@ const envSchema = z.object({
   /** Retries after a 429 / 5xx before failing with a controlled error. */
   MINDCASE_MAX_RETRIES: intEnv(3, 0, 10),
 
+  // ── Reddit data providers (Mindcase / Arctic Shift) ───────────────────────
+  // Only these two knobs live here; the provider selection itself
+  // (REDDIT_DATA_MODE, REDDIT_PRIMARY_PROVIDER, the REDDIT_ENABLE_* flags,
+  // timeouts and the per-provider settings) is parsed and cross-validated in
+  // config/redditDataConfig.ts, which owns that whole surface.
+  /**
+   * WORKER: whether the Reddit ingestion job is scheduled at all.
+   *
+   * Defaults to FALSE so deploying this code does not silently start spending
+   * provider quota. Set it to true in the environment to turn ingestion on;
+   * REDDIT_DATA_MODE then decides which upstream(s) run.
+   */
+  REDDIT_INGESTION_ENABLED: boolFromString(false),
+  /** WORKER: seconds between Reddit ingestion runs. */
+  REDDIT_INGESTION_REFRESH_SECONDS: intEnv(900, 60, 86_400),
+
   /** WORKER: seconds between social ingestion runs (refreshSocialPulse). */
   SOCIAL_DATA_REFRESH_SECONDS: intEnv(600, 60, 86_400),
   /** WORKER: seconds between ticker-strip snapshot runs. */

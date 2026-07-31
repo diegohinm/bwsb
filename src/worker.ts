@@ -1,5 +1,9 @@
 import { env } from "./config/env.js";
 import { BRANDING } from "./config/branding.js";
+import {
+  describeRedditDataConfig,
+  getRedditDataConfig,
+} from "./config/redditDataConfig.js";
 import { SERVICE_ROLE, isApiRole } from "./config/serviceRole.js";
 import { WORKER_NAME } from "./config/ingestion.js";
 import { startJobLoop, type JobLoopHandle } from "./lib/jobRunner.js";
@@ -8,6 +12,7 @@ import { refreshMarketQuotes } from "./jobs/refreshMarketQuotes.job.js";
 import { refreshMarketMovers } from "./jobs/refreshMarketMovers.job.js";
 import { refreshSocialPulse } from "./jobs/refreshSocialPulse.job.js";
 import { refreshTickerStrip } from "./jobs/refreshTickerStrip.job.js";
+import { runRedditIngestion } from "./workers/redditWorker.js";
 
 /**
  * YOLOPulse INGESTION WORKER (bwsb-worker).
@@ -41,6 +46,21 @@ function banner(): void {
     `[worker] social=${env.SOCIAL_DATA_PROVIDER} every ${env.SOCIAL_DATA_REFRESH_SECONDS}s · ` +
       `market=${env.MARKET_DATA_PROVIDER} (mode=${env.MARKET_DATA_MODE}, delay ${env.MARKET_DATA_DELAY_MINUTES}m) every ${env.MARKET_DATA_REFRESH_SECONDS}s`,
   );
+
+  // Reddit providers: report the configured mode, or why the job is off. A bad
+  // configuration is logged here rather than thrown, so one invalid variable
+  // cannot stop the market/social jobs from running.
+  if (env.REDDIT_INGESTION_ENABLED) {
+    try {
+      console.log(
+        `[worker] reddit=${describeRedditDataConfig(getRedditDataConfig())} every ${env.REDDIT_INGESTION_REFRESH_SECONDS}s`,
+      );
+    } catch (err) {
+      console.error(
+        `[worker] ⚠ ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  }
 
   if (isApiRole) {
     // Not fatal: a misconfigured role should be loud, not silently useless.
@@ -89,6 +109,25 @@ function start(): void {
       initialDelayMs: 60_000,
     }),
   );
+
+  // Reddit ingestion through the configurable provider layer. OPT-IN: without
+  // REDDIT_INGESTION_ENABLED=true the job is never scheduled, so deploying this
+  // code cannot start spending provider quota on its own.
+  if (env.REDDIT_INGESTION_ENABLED) {
+    loops.push(
+      startJobLoop({
+        name: "runRedditIngestion",
+        intervalSeconds: env.REDDIT_INGESTION_REFRESH_SECONDS,
+        run: runRedditIngestion,
+        // Last of the staggered starts: it is the heaviest provider job.
+        initialDelayMs: 20_000,
+      }),
+    );
+  } else {
+    console.log(
+      "[worker] Reddit ingestion is disabled (set REDDIT_INGESTION_ENABLED=true to schedule it).",
+    );
+  }
 
   // Keep the process alive even when every timer is unref'd.
   const keepAlive = setInterval(() => {}, 1 << 30);

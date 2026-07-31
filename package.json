@@ -11,6 +11,7 @@
     "build": "tsc",
     "start": "node dist/server.js",
     "worker": "node dist/worker.js",
+    "test": "tsx --test \"src/**/__tests__/*.test.ts\"",
     "typecheck": "tsc --noEmit && tsc -p tsconfig.seed.json",
     "prisma:generate": "prisma generate",
     "prisma:status": "prisma migrate status",
@@ -28,6 +29,7 @@
     "leaderboard:recalculate": "tsx src/jobs/recalculateLeaderboard.job.ts",
     "tokens:expire": "tsx src/jobs/expireAuthTokens.job.ts",
     "social:refresh": "tsx src/jobs/refreshSocialPulse.job.ts",
+    "reddit:ingest": "tsx src/workers/redditWorker.ts",
     "strip:refresh": "tsx src/jobs/refreshTickerStrip.job.ts",
     "ingest:once": "npm run market:refresh && npm run movers:refresh && npm run social:refresh && npm run strip:refresh",
     "jobs:all": "npm run portfolio:recalculate && npm run leaderboard:recalculate && npm run tokens:expire && npm run ingest:once"

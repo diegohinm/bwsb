@@ -23,6 +23,31 @@ The app is informational only and does not provide investment advice.
 - Virtual paper-trading portfolios
 - Rankings and competitions
 
+## Data providers
+
+YOLOPulse never scrapes Reddit. Public discussion data is retrieved server-side
+from swappable third-party providers, selected entirely through environment
+variables:
+
+| Domain | Variable | Options |
+|---|---|---|
+| Reddit posts/comments | `REDDIT_DATA_MODE` | `mindcase`, `arctic_shift`, `hybrid`, `fallback` |
+| Subreddit Pulse | `SOCIAL_DATA_PROVIDER` | `mock`, `mindcase`, `brandwatch`, `reddit_official`, `off` |
+| Market data | `MARKET_DATA_PROVIDER` | `mock`, `databento`, `polygon`, `alpaca`, `twelvedata` |
+
+`hybrid` queries every enabled Reddit provider and merges the results,
+de-duplicated by Reddit id; `fallback` uses a secondary provider only when the
+primary is rate-limited, times out, errors or returns nothing. Switching
+between them requires no code change — see
+[`src/providers/reddit/README.md`](src/providers/reddit/README.md) and
+`.env.example`.
+
+Two processes run from this repo. **Only the worker** (`npm run worker`) calls
+an upstream provider; the API (`npm start`) reads PostgreSQL and the frontend
+reads the API. Provider API keys exist only in the worker's environment, and
+the boundary is enforced in code, not just documented. If every provider is
+unavailable the app continues serving the most recent stored data.
+
 ## Reddit Integration
 
 YOLOPulse is an external web app, not a Reddit-hosted Devvit app.

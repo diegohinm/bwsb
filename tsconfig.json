@@ -18,5 +18,7 @@
     "noFallthroughCasesInSwitch": true
   },
   "include": ["src/**/*.ts"],
-  "exclude": ["node_modules", "dist"]
+  // Tests run through tsx (`npm test`) and are never compiled into dist/.
+  // They are still typechecked — tsconfig.seed.json covers them.
+  "exclude": ["node_modules", "dist", "src/**/__tests__/**"]
 }

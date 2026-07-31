@@ -31,6 +31,7 @@ import { dashboardRouter } from "./routes/dashboard.routes.js";
 import { marketDataRouter } from "./routes/marketData.routes.js";
 import { productRouter } from "./routes/product.routes.js";
 import { personalRouter } from "./routes/personal.routes.js";
+import { internalRedditRouter } from "./routes/internalReddit.routes.js";
 import { notFound } from "./middleware/notFound.js";
 import { errorHandler } from "./middleware/errorHandler.js";
 
@@ -102,6 +103,8 @@ app.use("/api", productRouter);
 app.use("/api", redditVerificationRouter);
 // Admin review endpoints (x-admin-secret applied inside the router).
 app.use("/admin", adminRedditVerificationRouter);
+// Internal Reddit provider diagnostics (x-admin-secret applied inside).
+app.use("/api", internalRedditRouter);
 // Protected personal features (requireAuth applied inside the router). Mounted
 // after the public routers so public routes are handled without auth.
 app.use("/api", personalRouter);

@@ -844,6 +844,13 @@ model RedditAttachments {
   @@map("reddit_attachments")
 }
 
+/// Reddit comments. `reddit_comment_id` is the Reddit id WITHOUT the `t1_`
+/// prefix, which is what makes the ingestion upsert idempotent across
+/// providers — see src/providers/reddit/.
+///
+/// PRIVACY: `author_hash` is a one-way hash of the Reddit username. The raw
+/// username is never stored and never leaves the provider layer.
+///
 /// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
 model RedditComments {
   redditCommentId String       @id @map("reddit_comment_id")
@@ -854,13 +861,44 @@ model RedditComments {
   score           Int          @default(0)
   redditCreatedAt DateTime?    @map("reddit_created_at") @db.Timestamptz(6)
   createdAt       DateTime     @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  // ── Provider provenance (src/providers/reddit/) ───────────────────────────
+  /// Reddit fullname (`t1_<id>`).
+  fullname        String?
+  /// Parent fullname: `t1_…` for a reply, `t3_…` for a top-level comment.
+  parentId        String?      @map("parent_id")
+  permalink       String?
+  /// Provider treated as authoritative for this row.
+  source          String?
+  /// Every provider that has returned this record.
+  sources         String[]     @default([])
+  /// When the row was first captured.
+  fetchedAt       DateTime?    @map("fetched_at") @db.Timestamptz(6)
+  /// When a provider last confirmed the record still exists.
+  lastSeenAt      DateTime?    @map("last_seen_at") @db.Timestamptz(6)
+  /// Upstream payload, stored only when REDDIT_STORE_SOURCE_METADATA=true.
+  rawData         Json?        @map("raw_data")
+
   redditPosts     RedditPosts? @relation(fields: [redditPostId], references: [redditPostId], onDelete: Cascade, onUpdate: NoAction)
 
   @@index([authorHash], map: "reddit_comments_author_idx")
   @@index([redditPostId], map: "reddit_comments_post_idx")
+  @@index([subreddit, redditCreatedAt(sort: Desc)], map: "reddit_comments_subreddit_created_idx")
   @@map("reddit_comments")
 }
 
+/// Reddit posts — the spine of the bet-extraction pipeline (bets, DD quality,
+/// ticker mentions, stance events and snapshots all hang off this table).
+///
+/// `reddit_post_id` is the Reddit id WITHOUT the `t3_` prefix. That single
+/// convention is what lets several upstream providers write here without ever
+/// producing a duplicate: Mindcase and Arctic Shift describing the same post
+/// resolve to the same primary key, so ingestion is an upsert. See
+/// src/providers/reddit/ and src/services/redditIngestionService.ts.
+///
+/// PRIVACY: `author_hash` is a one-way hash of the Reddit username. The raw
+/// username is never stored and never leaves the provider layer.
+///
 /// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
 model RedditPosts {
   redditPostId       String               @id @map("reddit_post_id")
@@ -873,6 +911,24 @@ model RedditPosts {
   permalink          String?
   redditCreatedAt    DateTime?            @map("reddit_created_at") @db.Timestamptz(6)
   createdAt          DateTime             @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  // ── Provider provenance (src/providers/reddit/) ───────────────────────────
+  /// Reddit fullname (`t3_<id>`).
+  fullname           String?
+  /// External link a link-post points at; null for self posts.
+  url                String?
+  upvoteRatio        Decimal?             @map("upvote_ratio") @db.Decimal
+  /// Provider treated as authoritative for this row.
+  source             String?
+  /// Every provider that has returned this record.
+  sources            String[]             @default([])
+  /// When the row was first captured.
+  fetchedAt          DateTime?            @map("fetched_at") @db.Timestamptz(6)
+  /// When a provider last confirmed the record still exists.
+  lastSeenAt         DateTime?            @map("last_seen_at") @db.Timestamptz(6)
+  /// Upstream payload, stored only when REDDIT_STORE_SOURCE_METADATA=true.
+  rawData            Json?                @map("raw_data")
+
   bets               Bets[]
   ddQualityScores    DdQualityScores?
   postSnapshots      PostSnapshots[]
@@ -881,6 +937,7 @@ model RedditPosts {
   tickerMentions     TickerMentions[]
   tickerStanceEvents TickerStanceEvents[]
 
+  @@index([subreddit, redditCreatedAt(sort: Desc)], map: "reddit_posts_subreddit_created_idx")
   @@map("reddit_posts")
 }
 

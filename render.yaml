@@ -88,6 +88,41 @@ services:
       - key: TICKER_STRIP_REFRESH_SECONDS
         value: "300"
 
+      # ── Reddit ingestion (Mindcase / Arctic Shift) ───────────────────────
+      # Feeds reddit_posts / reddit_comments. Changing REDDIT_DATA_MODE is the
+      # ONLY thing needed to switch upstream: mindcase | arctic_shift | hybrid |
+      # fallback. Worker-only, like every other provider setting here.
+      - key: REDDIT_INGESTION_ENABLED
+        value: "false"
+      - key: REDDIT_INGESTION_REFRESH_SECONDS
+        value: "900"
+      - key: REDDIT_DATA_MODE
+        value: hybrid
+      - key: REDDIT_PRIMARY_PROVIDER
+        value: arctic_shift
+      - key: REDDIT_FALLBACK_PROVIDER
+        value: mindcase
+      - key: REDDIT_ENABLE_MINDCASE
+        value: "true"
+      - key: REDDIT_ENABLE_ARCTIC_SHIFT
+        value: "true"
+      - key: REDDIT_PROVIDER_TIMEOUT_MS
+        value: "30000"
+      - key: REDDIT_PROVIDER_MAX_RETRIES
+        value: "3"
+      - key: REDDIT_PROVIDER_RETRY_DELAY_MS
+        value: "5000"
+      - key: REDDIT_DEDUPLICATE_RESULTS
+        value: "true"
+      - key: REDDIT_STORE_SOURCE_METADATA
+        value: "true"
+      - key: MINDCASE_MAX_POLL_ATTEMPTS
+        value: "20"
+      - key: ARCTIC_SHIFT_BASE_URL
+        value: https://arctic-shift.photon-reddit.com
+      - key: ARCTIC_SHIFT_REQUEST_DELAY_MS
+        value: "1000"
+
       # ── Market ingestion (Databento) ─────────────────────────────────────
       - key: MARKET_DATA_PROVIDER
         value: databento
