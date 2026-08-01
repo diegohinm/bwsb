@@ -43,10 +43,14 @@ import type {
  * is demo.
  */
 
-/** Cross-subreddit pulse. Reads stored snapshots; never calls a provider. */
+/**
+ * Cross-subreddit pulse. Reads stored snapshots; never calls a provider — a
+ * community filter narrows a DATABASE query, it never triggers ingestion.
+ */
 export async function getSubredditPulse(params: {
   timeframe: PulseTimeframe;
   q?: string;
+  subreddits?: readonly string[];
 }): Promise<SubredditPulseResponse> {
   return getStoredSubredditPulse(params);
 }
@@ -203,4 +207,9 @@ export async function refreshSocialCache(): Promise<{
 }
 
 export * from "./socialData.types.js";
-export { TRACKED_SUBREDDITS, TRACKED_SUBREDDIT_NAMES } from "./subreddits.js";
+export {
+  TRACKED_SUBREDDITS,
+  TRACKED_SUBREDDIT_NAMES,
+  normalizeSubreddit,
+  parseSubredditFilter,
+} from "./subreddits.js";

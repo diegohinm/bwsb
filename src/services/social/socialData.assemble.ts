@@ -1,5 +1,5 @@
 import { buildSubredditPulse } from "./pulseAggregator.service.js";
-import { displayName } from "./subreddits.js";
+import { TRACKED_SUBREDDIT_NAMES, displayName } from "./subreddits.js";
 import type {
   PulseTimeframe,
   SocialContentType,
@@ -39,15 +39,22 @@ function matchesQuery(item: SocialPostItem, q: string): boolean {
   return hay.includes(q);
 }
 
+/**
+ * `subreddits` — canonical names the response must be limited to. The search
+ * query is applied FIRST and the community filter inside it, so the two compose:
+ * "NVDA in r/stocks + r/wallstreetbets" narrows on both axes.
+ */
 export function assemblePulseResponse(
   items: SocialPostItem[],
   timeframe: PulseTimeframe,
   q: string | undefined,
   meta: ResponseMeta,
+  subreddits?: readonly string[],
 ): SubredditPulseResponse {
   const query = (q ?? "").trim().toLowerCase();
   const scoped = query ? items.filter((i) => matchesQuery(i, query)) : items;
-  const aggregate = buildSubredditPulse(scoped, timeframe);
+  const selected = subreddits?.length ? [...subreddits] : [...TRACKED_SUBREDDIT_NAMES];
+  const aggregate = buildSubredditPulse(scoped, timeframe, selected);
 
   return {
     timeframe,
@@ -57,6 +64,8 @@ export function assemblePulseResponse(
     updatedAt: meta.updatedAt,
     ...(meta.warning ? { warning: meta.warning } : {}),
     ...aggregate,
+    availableSubreddits: [...TRACKED_SUBREDDIT_NAMES],
+    selectedSubreddits: selected,
   };
 }
 

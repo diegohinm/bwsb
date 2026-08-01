@@ -53,6 +53,30 @@ interface ArcticShiftResponse {
   data?: unknown;
 }
 
+/** One page of posts, plus what the caller needs to decide what happens next. */
+export interface ArcticShiftPage {
+  posts: NormalizedRedditPost[];
+  /** Records the upstream returned, before normalization dropped any. */
+  receivedCount: number;
+  /** The response filled the page — the window probably holds more. */
+  hasMore: boolean;
+  /** Window actually requested, for the log line and the metrics row. */
+  after: Date | undefined;
+  before: Date | undefined;
+  limit: number;
+}
+
+export interface ArcticShiftPageInput {
+  subreddit: string;
+  after?: Date;
+  before?: Date;
+  limit?: number;
+  /** `asc` walks the window oldest-first, which is what incremental sync wants. */
+  sort?: "asc" | "desc";
+  /** Per-attempt abort. Overrides the shared provider timeout. */
+  timeoutMs?: number;
+}
+
 export class ArcticShiftProvider implements RedditDataProvider {
   readonly name = "arctic_shift" as const;
 
@@ -114,6 +138,74 @@ export class ArcticShiftProvider implements RedditDataProvider {
     );
 
     return applyPostSort(posts, input.sort).slice(0, limit);
+  }
+
+  /**
+   * ONE request. No pagination, no retries, no backoff sleep.
+   *
+   * `fetchPosts` above is the general-purpose path: it pages until it has what
+   * the caller asked for, and the HTTP client retries transient failures. The
+   * scheduled worker cannot use it, because "one request every five minutes"
+   * has to mean one HTTP request — a paginating call that also retries can
+   * legitimately produce twenty. This method is the primitive that keeps that
+   * promise: exactly one GET, whatever happens.
+   *
+   * Failures are thrown as `RedditProviderError` (rate_limit carries
+   * `retryAfterSeconds`), because the WORKER decides what a failure means —
+   * waiting for its next slot, never an immediate second attempt.
+   */
+  async fetchPostsPage(input: ArcticShiftPageInput): Promise<ArcticShiftPage> {
+    assertProviderCallsAllowed("Arctic Shift");
+
+    const subreddit = cleanSubreddit(input.subreddit);
+    if (!subreddit) {
+      throw new RedditProviderError(
+        this.name,
+        "client",
+        "fetchPostsPage requires a subreddit.",
+      );
+    }
+
+    const limit = Math.max(1, Math.min(PAGE_SIZE, Math.trunc(input.limit ?? PAGE_SIZE)));
+    const sort = input.sort ?? "asc";
+    const url = this.buildUrl(POSTS_PATH, {
+      subreddit,
+      limit: String(limit),
+      sort,
+      ...(input.after ? { after: toEpochSeconds(input.after) } : {}),
+      ...(input.before ? { before: toEpochSeconds(input.before) } : {}),
+    });
+
+    const fetchedAt = new Date();
+    const response = await trackProviderCall(this.name, () =>
+      requestJson<ArcticShiftResponse>({
+        provider: this.name,
+        url,
+        timeoutMs: input.timeoutMs ?? this.timeoutMs,
+        // The two lines that make this single-request: no retries, and
+        // therefore no backoff sleep between attempts that do not exist.
+        maxRetries: 0,
+        retryDelayMs: 0,
+        label: POSTS_PATH,
+      }),
+    );
+
+    const records = extractRecords(response);
+    const posts = normalizePosts(records, normalizeArcticShiftPost, {
+      subreddit,
+      fetchedAt,
+    });
+
+    return {
+      posts,
+      receivedCount: records.length,
+      // A full page means the window was truncated. The worker resumes from the
+      // last stored post on this subreddit's NEXT turn — never immediately.
+      hasMore: records.length >= limit,
+      after: input.after,
+      before: input.before,
+      limit,
+    };
   }
 
   async fetchComments(

@@ -1544,3 +1544,224 @@ model WorkerRuns {
   @@index([status, createdAt(sort: Desc)], map: "worker_runs_status_idx")
   @@map("worker_runs")
 }
+
+/// Round-robin + pacing state for a Reddit ingestion worker.
+///
+/// ONE ROW PER WORKER (`worker_name`), holding everything that must survive a
+/// restart or a second instance: which subreddit is next, when the last upstream
+/// request actually left, how many consecutive cycles have failed, and the
+/// lease that stops two instances from calling the upstream at the same time.
+///
+/// `request_log` is a rolling array of ISO timestamps for the last hour — it is
+/// what makes the "never more than 12 requests per hour" guarantee outlive a
+/// process restart, which an in-memory counter cannot do.
+model RedditWorkerState {
+  id                  String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  workerName          String    @unique @map("worker_name")
+  nextSubredditIndex  Int       @default(0) @map("next_subreddit_index")
+  /// When the last upstream request STARTED — the base for the 5-minute gate.
+  lastRequestAt       DateTime? @map("last_request_at") @db.Timestamptz(6)
+  lastSuccessfulRunAt DateTime? @map("last_successful_run_at") @db.Timestamptz(6)
+  consecutiveFailures Int       @default(0) @map("consecutive_failures")
+  /// Set from a 429's Retry-After. No request may leave before it passes.
+  blockedUntil        DateTime? @map("blocked_until") @db.Timestamptz(6)
+  /// ISO timestamps of the requests made in the last hour.
+  requestLog          Json      @default("[]") @map("request_log")
+  /// Distributed lease: who holds the right to run a cycle, and until when.
+  lockedBy            String?   @map("locked_by")
+  lockedUntil         DateTime? @map("locked_until") @db.Timestamptz(6)
+  createdAt           DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt           DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  @@map("reddit_worker_state")
+}
+
+/// Per-subreddit ingestion cursor, independent for every provider.
+///
+/// The cursor is advanced ONLY after a fetch, its normalization AND its
+/// persistence have all succeeded — a Prisma failure must leave the window
+/// intact so the next cycle re-reads it instead of skipping posts forever.
+///
+/// `has_more` records that a response filled the page: the next turn for that
+/// subreddit resumes from the last stored post instead of jumping to now, which
+/// keeps catch-up inside the one-request-per-cycle budget.
+model RedditIngestionCursor {
+  id                   String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  provider             String
+  subreddit            String
+  contentType          String    @map("content_type")
+  /// Newest post timestamp persisted so far. The next window starts here.
+  lastCreatedAt        DateTime? @map("last_created_at") @db.Timestamptz(6)
+  lastExternalId       String?   @map("last_external_id")
+  lastAttemptAt        DateTime? @map("last_attempt_at") @db.Timestamptz(6)
+  lastSuccessfulSyncAt DateTime? @map("last_successful_sync_at") @db.Timestamptz(6)
+  lastErrorCode        String?   @map("last_error_code")
+  lastErrorMessage     String?   @map("last_error_message")
+  consecutiveFailures  Int       @default(0) @map("consecutive_failures")
+  /// The last response filled the page; there is probably more in the window.
+  hasMore              Boolean   @default(false) @map("has_more")
+  /// Set after repeated failures — the subreddit is skipped until it passes.
+  cooldownUntil        DateTime? @map("cooldown_until") @db.Timestamptz(6)
+  createdAt            DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt            DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  @@unique([provider, subreddit, contentType], map: "reddit_ingestion_cursors_unique")
+  @@index([provider, subreddit], map: "reddit_ingestion_cursors_provider_idx")
+  @@map("reddit_ingestion_cursors")
+}
+
+/// WSB PORTFOLIO — one row per timeframe per worker run.
+///
+/// Written by `refreshWsbPortfolio.job.ts` from positions the worker extracted
+/// out of already-ingested social content; the API only ever reads the newest
+/// `snapshot_at` for a timeframe. Percentages are stored, not recomputed at read
+/// time, so two surfaces rendered seconds apart cannot disagree.
+model WsbPortfolioSummarySnapshots {
+  id            String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  timeframe     String
+  /// Distinct anonymized authors holding at least one extracted position.
+  traders       Int      @default(0)
+  bullishPct    Decimal? @map("bullish_pct") @db.Decimal(5, 2)
+  totalExposure Decimal? @map("total_exposure") @db.Decimal
+  optionsPct    Decimal? @map("options_pct") @db.Decimal(5, 2)
+  stocksPct     Decimal? @map("stocks_pct") @db.Decimal(5, 2)
+  cryptoPct     Decimal? @map("crypto_pct") @db.Decimal(5, 2)
+  zeroDteCount  Int      @default(0) @map("zero_dte_count")
+  weeklyCount   Int      @default(0) @map("weekly_count")
+  swingCount    Int      @default(0) @map("swing_count")
+  leapsCount    Int      @default(0) @map("leaps_count")
+  provider      String?
+  source        String?
+  isMock        Boolean  @default(false) @map("is_mock")
+  warning       String?
+  snapshotAt    DateTime @map("snapshot_at") @db.Timestamptz(6)
+  createdAt     DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  @@index([timeframe, snapshotAt(sort: Desc)], map: "wsb_portfolio_summary_snapshots_tf_idx")
+  @@map("wsb_portfolio_summary_snapshots")
+}
+
+/// One aggregated OPTION position (underlying + type + strike + expiration),
+/// not one trader's contract: `holders` and `quantity` are the roll-up.
+///
+/// `duration_bucket` is persisted rather than derived on read because DTE moves
+/// with the clock — a row must stay in the bucket it was classified into when
+/// the snapshot was taken, and the API filter is then an indexed equality.
+model WsbOptionPositionSnapshots {
+  id                String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  timeframe         String
+  underlying        String
+  /// `call` | `put`.
+  optionType        String   @map("option_type")
+  strike            Decimal  @db.Decimal
+  expiration        DateTime @db.Date
+  /// Days to expiration at snapshot time.
+  dte               Int
+  /// `zero_dte` | `weekly` | `swing` | `leaps`.
+  durationBucket    String   @map("duration_bucket")
+  holders           Int      @default(0)
+  quantity          Int      @default(0)
+  estimatedValue    Decimal? @map("estimated_value") @db.Decimal
+  sentimentPct      Decimal? @map("sentiment_pct") @db.Decimal(5, 2)
+  changePct         Decimal? @map("change_pct") @db.Decimal
+  /// `verified` | `extracted` | `screenshot` | `text_only`.
+  verificationLevel String   @default("extracted") @map("verification_level")
+  provider          String?
+  source            String?
+  isMock            Boolean  @default(false) @map("is_mock")
+  snapshotAt        DateTime @map("snapshot_at") @db.Timestamptz(6)
+  createdAt         DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  @@index([timeframe, snapshotAt(sort: Desc)], map: "wsb_option_position_snapshots_tf_idx")
+  @@index([underlying, snapshotAt(sort: Desc)], map: "wsb_option_position_snapshots_underlying_idx")
+  @@index([durationBucket, expiration], map: "wsb_option_position_snapshots_duration_idx")
+  @@map("wsb_option_position_snapshots")
+}
+
+/// Aggregated WSB stock holdings — one row per ticker per snapshot.
+model WsbStockPositionSnapshots {
+  id                String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  timeframe         String
+  ticker            String
+  companyName       String?  @map("company_name")
+  holders           Int      @default(0)
+  shares            Decimal  @default(0) @db.Decimal
+  estimatedValue    Decimal? @map("estimated_value") @db.Decimal
+  bullishPct        Decimal? @map("bullish_pct") @db.Decimal(5, 2)
+  changePct         Decimal? @map("change_pct") @db.Decimal
+  /// Community that contributed the most mentions for this holding.
+  topSubreddit      String?  @map("top_subreddit")
+  verificationLevel String   @default("extracted") @map("verification_level")
+  provider          String?
+  source            String?
+  isMock            Boolean  @default(false) @map("is_mock")
+  snapshotAt        DateTime @map("snapshot_at") @db.Timestamptz(6)
+  createdAt         DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  @@index([timeframe, snapshotAt(sort: Desc)], map: "wsb_stock_position_snapshots_tf_idx")
+  @@index([ticker, snapshotAt(sort: Desc)], map: "wsb_stock_position_snapshots_ticker_idx")
+  @@map("wsb_stock_position_snapshots")
+}
+
+/// Aggregated WSB crypto holdings. Stays empty until the extractor can identify
+/// a crypto position with enough confidence — an empty table renders an empty
+/// state, never invented holdings.
+model WsbCryptoPositionSnapshots {
+  id                String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  timeframe         String
+  assetName         String?  @map("asset_name")
+  symbol            String
+  holders           Int      @default(0)
+  quantity          Decimal  @default(0) @db.Decimal
+  estimatedValue    Decimal? @map("estimated_value") @db.Decimal
+  bullishPct        Decimal? @map("bullish_pct") @db.Decimal(5, 2)
+  changePct         Decimal? @map("change_pct") @db.Decimal
+  verificationLevel String   @default("extracted") @map("verification_level")
+  provider          String?
+  source            String?
+  isMock            Boolean  @default(false) @map("is_mock")
+  snapshotAt        DateTime @map("snapshot_at") @db.Timestamptz(6)
+  createdAt         DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  @@index([timeframe, snapshotAt(sort: Desc)], map: "wsb_crypto_position_snapshots_tf_idx")
+  @@index([symbol, snapshotAt(sort: Desc)], map: "wsb_crypto_position_snapshots_symbol_idx")
+  @@map("wsb_crypto_position_snapshots")
+}
+
+/// A WSB "banbet": a public call that a ticker reaches a price by a deadline.
+///
+/// Unlike the snapshot tables this is a LIVE record, not an append-only run:
+/// `external_id` keys the upsert so re-ingesting the same bet updates its status
+/// instead of duplicating it. Identity is stored hashed; `display_username` is
+/// populated only when the provider's terms allow showing it.
+model WsbBanbets {
+  id              String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  externalId      String?   @unique @map("external_id")
+  usernameHash    String    @map("username_hash")
+  displayUsername String?   @map("display_username")
+  /// Set when the banbet belongs to a YOLOPulse account, so /me can find it.
+  appUserId       String?   @map("app_user_id") @db.Uuid
+  ticker          String
+  /// `gte` | `lte`.
+  operator        String
+  targetPrice     Decimal   @map("target_price") @db.Decimal
+  /// `bull` | `bear`.
+  side            String
+  /// `open` | `won` | `lost` | `expired`.
+  status          String
+  resultPct       Decimal?  @map("result_pct") @db.Decimal
+  sourceUrl       String?   @map("source_url")
+  subreddit       String?
+  createdAt       DateTime  @map("created_at") @db.Timestamptz(6)
+  expiresAt       DateTime  @map("expires_at") @db.Timestamptz(6)
+  resolvedAt      DateTime? @map("resolved_at") @db.Timestamptz(6)
+  provider        String?
+  source          String?
+  isMock          Boolean   @default(false) @map("is_mock")
+  fetchedAt       DateTime  @default(now()) @map("fetched_at") @db.Timestamptz(6)
+
+  @@index([status, expiresAt], map: "wsb_banbets_status_expires_idx")
+  @@index([ticker, createdAt(sort: Desc)], map: "wsb_banbets_ticker_created_idx")
+  @@index([appUserId, createdAt(sort: Desc)], map: "wsb_banbets_app_user_idx")
+  @@map("wsb_banbets")
+}

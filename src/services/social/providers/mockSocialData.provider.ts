@@ -40,7 +40,15 @@ export class MockSocialDataProvider implements SocialDataProvider {
     subreddits?: string[];
   }): Promise<SubredditPulseResponse> {
     const items = buildMockItems(params.timeframe);
-    return assemblePulseResponse(items, params.timeframe, params.q, this.meta());
+    // Demo data is filtered too — otherwise a deselected community would still
+    // show up whenever the fallback kicks in.
+    return assemblePulseResponse(
+      items,
+      params.timeframe,
+      params.q,
+      this.meta(),
+      params.subreddits,
+    );
   }
 
   async getTickerSocialFeed(params: {

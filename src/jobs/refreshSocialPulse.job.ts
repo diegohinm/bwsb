@@ -10,7 +10,7 @@ import {
   getSocialDataProvider,
   mockSocialDataProvider,
 } from "../services/social/socialDataProvider.factory.js";
-import { TRACKED_SUBREDDIT_NAMES } from "../services/social/subreddits.js";
+import { redditConfig } from "../config/reddit.config.js";
 import type { SocialItemsResult } from "../services/social/socialData.provider.js";
 import type { PulseTimeframe } from "../services/social/socialData.types.js";
 
@@ -38,7 +38,8 @@ function demoModeActive(): boolean {
 
 export async function refreshSocialPulse(): Promise<JobMetadata> {
   const provider = demoModeActive() ? mockSocialDataProvider : getSocialDataProvider();
-  const subreddits = [...TRACKED_SUBREDDIT_NAMES];
+  // REDDIT_SUBREDDITS drives every provider, this one included.
+  const subreddits = [...redditConfig.subreddits];
 
   if (typeof provider.fetchItems !== "function") {
     throw new Error(

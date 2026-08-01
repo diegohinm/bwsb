@@ -1,8 +1,10 @@
 import { Router } from "express";
 
+import { arcticShiftWorkerConfig, redditConfig } from "../config/reddit.config.js";
 import { getRedditDataConfig } from "../config/redditDataConfig.js";
 import { fail, ok } from "../lib/response.js";
 import { requireAdmin } from "../middleware/requireAdmin.js";
+import { requireInternalOrAdmin } from "../middleware/requireInternalOrAdmin.js";
 import { sanitizeProviderError } from "../providers/reddit/providerErrors.js";
 import { getRedditProvidersStatus } from "../providers/reddit/RedditProviderFactory.js";
 
@@ -27,6 +29,43 @@ import { getRedditProvidersStatus } from "../providers/reddit/RedditProviderFact
  * with counters at zero; run it against the worker for live call history.
  */
 export const internalRedditRouter = Router();
+
+/**
+ * GET /api/internal/reddit/config
+ *
+ * The ingestion configuration an operator needs to read the scanner page: which
+ * communities the worker rotates through, how fast it rotates, and which
+ * provider mode is active.
+ *
+ * SAFE BY CONSTRUCTION — the response is BUILT FIELD BY FIELD from values that
+ * are already public knowledge inside the product. No API key, no token, no
+ * base URL, no header, and no `...spread` of a config object that might grow a
+ * secret later. Guarded by `requireInternalOrAdmin`, the same middleware as the
+ * scanner itself.
+ */
+internalRedditRouter.get(
+  "/internal/reddit/config",
+  requireInternalOrAdmin,
+  (_req, res) => {
+    let providerMode = "unknown";
+    try {
+      providerMode = getRedditDataConfig().mode;
+    } catch {
+      // An invalid provider configuration must not hide the subreddit list —
+      // that list is exactly what the operator came to check.
+    }
+
+    ok(res, {
+      subreddits: [...redditConfig.subreddits],
+      pollIntervalMs: redditConfig.pollIntervalMs,
+      providerMode,
+      postLimit: redditConfig.postLimit,
+      workerEnabled: arcticShiftWorkerConfig.enabled,
+      /** Reddit lists come from REDDIT_SUBREDDITS; edits need a restart. */
+      source: redditConfig.source,
+    });
+  },
+);
 
 internalRedditRouter.get(
   "/internal/reddit/providers/status",

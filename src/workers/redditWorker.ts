@@ -1,10 +1,13 @@
+import { arcticShiftWorkerConfig } from "../config/reddit.config.js";
 import {
   describeRedditDataConfig,
   getRedditDataConfig,
 } from "../config/redditDataConfig.js";
 import { isMainModule, runJobAsScript, type JobMetadata } from "../lib/jobRunner.js";
+import { disconnectPrisma } from "../lib/prisma.js";
 import { getRedditDataProvider } from "../providers/reddit/RedditProviderFactory.js";
 import { ingestRedditPosts } from "../services/redditIngestionService.js";
+import { buildArcticShiftWorker } from "./reddit/startArcticShiftWorker.js";
 
 /**
  * WORKER JOB — Reddit ingestion through the configurable provider layer.
@@ -75,7 +78,62 @@ function redditIngestCommentsEnabled(): boolean {
   return process.env.REDDIT_INGEST_COMMENTS?.trim().toLowerCase() === "true";
 }
 
-// Manual run: npm run reddit:ingest
+/**
+ * Standalone Arctic Shift worker: `npm run dev:worker:reddit`.
+ *
+ * Runs the paced loop until SIGINT/SIGTERM. On a signal it stops SCHEDULING,
+ * lets the request already in flight finish its write, then closes Prisma —
+ * killing a cycle mid-persist is exactly how a cursor and the stored posts
+ * would drift apart.
+ *
+ * `--once` runs a single cycle instead (still rate-guarded), and `--ingest`
+ * runs the legacy multi-subreddit ingestion used by `npm run reddit:ingest`.
+ */
+async function runStandaloneArcticShiftWorker(): Promise<never> {
+  const worker = buildArcticShiftWorker();
+  const runOnce = process.argv.includes("--once");
+
+  let shuttingDown = false;
+  const shutdown = (signal: NodeJS.Signals): void => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    console.log(
+      `[ArcticShiftWorker] ${signal} received — no new cycles will start; ` +
+        `${worker.isRunning() ? "waiting for the in-flight request" : "nothing in flight"}.`,
+    );
+    worker.stop();
+  };
+  process.on("SIGINT", () => shutdown("SIGINT"));
+  process.on("SIGTERM", () => shutdown("SIGTERM"));
+
+  try {
+    if (runOnce) {
+      await worker.runOnce();
+    } else {
+      await worker.start();
+      // `start()` only resolves once the loop has stopped, which means the
+      // signal handler ran AND the last cycle finished.
+      while (worker.isRunning()) await new Promise((r) => setTimeout(r, 100));
+    }
+  } finally {
+    await disconnectPrisma();
+  }
+
+  console.log("[ArcticShiftWorker] Stopped cleanly.");
+  process.exit(0);
+}
+
 if (isMainModule(import.meta.url)) {
-  void runJobAsScript("runRedditIngestion", runRedditIngestion);
+  if (process.argv.includes("--ingest")) {
+    // Legacy one-shot backfill across every subreddit: npm run reddit:ingest
+    void runJobAsScript("runRedditIngestion", runRedditIngestion);
+  } else if (!arcticShiftWorkerConfig.enabled) {
+    console.error(
+      "[ArcticShiftWorker] ARCTIC_SHIFT_ENABLED is not true — refusing to start. " +
+        "Set ARCTIC_SHIFT_ENABLED=true to run the paced worker, or use --ingest for a one-shot backfill.",
+    );
+    process.exit(1);
+  } else {
+    void runStandaloneArcticShiftWorker();
+  }
 }

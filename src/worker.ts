@@ -1,5 +1,6 @@
 import { env } from "./config/env.js";
 import { BRANDING } from "./config/branding.js";
+import { arcticShiftWorkerConfig, redditConfig } from "./config/reddit.config.js";
 import {
   describeRedditDataConfig,
   getRedditDataConfig,
@@ -12,7 +13,11 @@ import { refreshMarketQuotes } from "./jobs/refreshMarketQuotes.job.js";
 import { refreshMarketMovers } from "./jobs/refreshMarketMovers.job.js";
 import { refreshSocialPulse } from "./jobs/refreshSocialPulse.job.js";
 import { refreshTickerStrip } from "./jobs/refreshTickerStrip.job.js";
+import { refreshWsbPortfolio } from "./jobs/refreshWsbPortfolio.job.js";
+import { refreshWsbBanbets } from "./jobs/refreshWsbBanbets.job.js";
 import { runRedditIngestion } from "./workers/redditWorker.js";
+import { buildArcticShiftWorker } from "./workers/reddit/startArcticShiftWorker.js";
+import type { ArcticShiftWorkerHandle } from "./workers/reddit/arcticShiftWorker.js";
 
 /**
  * YOLOPulse INGESTION WORKER (bwsb-worker).
@@ -37,6 +42,8 @@ import { runRedditIngestion } from "./workers/redditWorker.js";
  */
 
 const loops: JobLoopHandle[] = [];
+/** The paced Arctic Shift loop, when ARCTIC_SHIFT_ENABLED=true. */
+let arcticShiftWorker: ArcticShiftWorkerHandle | undefined;
 
 function banner(): void {
   console.log(
@@ -77,6 +84,16 @@ function banner(): void {
   }
 }
 
+/**
+ * How often one community is revisited: cycle interval × number of communities.
+ * Five subreddits on a five-minute cycle → each one every 25 minutes.
+ */
+function estimatedMinutesPerSubreddit(): number {
+  return Math.round(
+    (redditConfig.subreddits.length * redditConfig.pollIntervalMs) / 60_000,
+  );
+}
+
 function start(): void {
   banner();
 
@@ -108,12 +125,48 @@ function start(): void {
       // Runs on DB data only — give the first social/market runs a head start.
       initialDelayMs: 60_000,
     }),
+    // The two WSB jobs derive from stored content and stored quotes — no
+    // provider call, so their interval is a CPU/DB choice, not a rate-limit one.
+    // They run last in the cold-start order because they consume what the
+    // social and market jobs above have just written.
+    startJobLoop({
+      name: "refreshWsbPortfolio",
+      intervalSeconds: env.WSB_REFRESH_SECONDS,
+      run: refreshWsbPortfolio,
+      initialDelayMs: 90_000,
+    }),
+    startJobLoop({
+      name: "refreshWsbBanbets",
+      intervalSeconds: env.WSB_REFRESH_SECONDS,
+      run: refreshWsbBanbets,
+      initialDelayMs: 120_000,
+    }),
   );
 
-  // Reddit ingestion through the configurable provider layer. OPT-IN: without
-  // REDDIT_INGESTION_ENABLED=true the job is never scheduled, so deploying this
-  // code cannot start spending provider quota on its own.
-  if (env.REDDIT_INGESTION_ENABLED) {
+  // Arctic Shift: its own paced loop, NOT a job on an interval.
+  //
+  // It owns the global budget of one request every five minutes, so it cannot
+  // share the generic scheduler with the multi-subreddit ingestion job — the
+  // two together would multiply requests by the number of communities. When it
+  // is on, it REPLACES that job as the Reddit path.
+  if (arcticShiftWorkerConfig.enabled) {
+    arcticShiftWorker = buildArcticShiftWorker();
+    console.log(
+      `[worker] arctic_shift paced loop: 1 request / ${redditConfig.pollIntervalMs / 1000}s across ` +
+        `${redditConfig.subreddits.length} subreddit(s) — ` +
+        `~${estimatedMinutesPerSubreddit()} min per subreddit`,
+    );
+    // Fire-and-forget: the loop awaits its own pacing and stops on shutdown.
+    void arcticShiftWorker.start();
+
+    if (env.REDDIT_INGESTION_ENABLED) {
+      console.warn(
+        "[worker] ⚠ REDDIT_INGESTION_ENABLED=true is IGNORED while ARCTIC_SHIFT_ENABLED=true: " +
+          "the paced Arctic Shift loop is the Reddit ingestion path, and running both would " +
+          "break the one-request-per-five-minutes guarantee.",
+      );
+    }
+  } else if (env.REDDIT_INGESTION_ENABLED) {
     loops.push(
       startJobLoop({
         name: "runRedditIngestion",
@@ -138,14 +191,20 @@ function start(): void {
   registerPrismaShutdown("worker", async (signal) => {
     console.log(`[worker] ${signal} received — stopping schedulers…`);
     for (const loop of loops) loop.stop();
+    // Stops SCHEDULING; the request in flight is allowed to finish its write.
+    arcticShiftWorker?.stop();
     clearInterval(keepAlive);
 
     // Give in-flight jobs a bounded grace period to finish their DB writes.
     const deadline = Date.now() + 15_000;
-    while (loops.some((l) => l.isRunning()) && Date.now() < deadline) {
+    while (
+      (loops.some((l) => l.isRunning()) || arcticShiftWorker?.isRunning()) &&
+      Date.now() < deadline
+    ) {
       await new Promise((r) => setTimeout(r, 250));
     }
     const stillRunning = loops.filter((l) => l.isRunning()).map((l) => l.name);
+    if (arcticShiftWorker?.isRunning()) stillRunning.push("arcticShiftCycle");
     if (stillRunning.length > 0) {
       console.warn(`[worker] still running at shutdown: ${stillRunning.join(", ")}`);
     }

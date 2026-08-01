@@ -133,6 +133,19 @@ const envSchema = z.object({
   // Shared secret for the admin-only Reddit-verification review endpoints.
   ADMIN_SECRET: optionalNonEmpty,
 
+  /**
+   * Comma-separated emails treated as administrators.
+   *
+   * The app has no user-role column: identity is email-based and every account
+   * is equal. This allowlist is the ONLY thing that makes a signed-in user an
+   * admin, and it exists so internal tooling (the Reddit scanner page) can be
+   * reached in production without putting ADMIN_SECRET in a browser.
+   *
+   * Empty (the default) means NOBODY is an admin — internal pages are then
+   * development-only. Compared case-insensitively against the user's email.
+   */
+  ADMIN_EMAILS: optionalNonEmpty,
+
   // ── Social data provider (Reddit-like posts/comments/pulse) ────────────────
   // The app never scrapes Reddit. Data comes from a swappable third-party
   // provider queried server-side, or from local demo fixtures.
@@ -182,6 +195,12 @@ const envSchema = z.object({
   SOCIAL_DATA_REFRESH_SECONDS: intEnv(600, 60, 86_400),
   /** WORKER: seconds between ticker-strip snapshot runs. */
   TICKER_STRIP_REFRESH_SECONDS: intEnv(300, 60, 86_400),
+  /**
+   * WORKER: seconds between WSB portfolio/banbet runs. Both jobs derive from
+   * data already in the database, so this paces CPU and writes — no provider
+   * quota is involved and it can safely be shortened.
+   */
+  WSB_REFRESH_SECONDS: intEnv(900, 60, 86_400),
   // How long a social payload is cached before the provider is queried again.
   // SOCIAL_DATA_CACHE_TTL_SECONDS is the canonical name; SOCIAL_CACHE_TTL_SECONDS
   // is accepted as a legacy alias. Resolved into env.SOCIAL_CACHE_TTL_SECONDS below.

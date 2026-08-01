@@ -165,8 +165,20 @@ export interface SubredditPulseResponse {
   emergingTickers: EmergingTickerMetric[];
   divergence: CommunityDivergenceMetric[];
   heatmap: PulseHeatmap;
-  /** Top tickers by raw mention volume across all communities (desc). */
+  /** Top tickers by raw mention volume across the selected communities (desc). */
   topMentioned: TopMentionedTicker[];
+  /**
+   * Every community the platform tracks (canonical names, no `r/`). The client
+   * renders its filter chips from this, so adding a community stays a
+   * backend-only change.
+   */
+  availableSubreddits: string[];
+  /**
+   * The communities THIS response was calculated from — echoes the request
+   * filter after normalization/validation, so the client can tell which of its
+   * requested names survived.
+   */
+  selectedSubreddits: string[];
 }
 
 export interface TickerSocialFeedResponse {

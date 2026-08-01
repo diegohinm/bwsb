@@ -1,4 +1,8 @@
-import { TRACKED_SUBREDDITS, displayName } from "./subreddits.js";
+import {
+  TRACKED_SUBREDDIT_NAMES,
+  displayName,
+  normalizeSubreddit,
+} from "./subreddits.js";
 import type {
   CommunityDivergenceMetric,
   EmergingTickerMetric,
@@ -157,10 +161,13 @@ function explain(
 
 function buildSubredditMetrics(
   bySub: Map<string, SocialPostItem[]>,
+  scope: readonly string[],
 ): SubredditPulseMetric[] {
   // Raw activity inputs, so we can normalize the score across communities.
-  const raw = TRACKED_SUBREDDITS.map((sub) => {
-    const items = bySub.get(sub.name) ?? [];
+  // Normalization is relative to the SELECTED set: activity scores describe how
+  // the chosen communities rank against each other, not against hidden ones.
+  const raw = scope.map((name) => {
+    const items = bySub.get(name) ?? [];
     const posts = items.filter((i) => !isComment(i));
     const comments = items.filter(isComment);
     const scoreSum = items.reduce((s, i) => s + (i.score ?? 0), 0);
@@ -172,17 +179,17 @@ function buildSubredditMetrics(
       scoreSum * 0.01 +
       commentSum * 0.02 +
       diversity * 2.0;
-    return { sub, items, posts, comments, diversity, activityRaw };
+    return { name, items, posts, comments, diversity, activityRaw };
   });
 
   const maxActivity = Math.max(1, ...raw.map((r) => r.activityRaw));
 
   return raw
-    .map(({ sub, items, posts, comments, activityRaw }) => {
+    .map(({ name, items, posts, comments, activityRaw }) => {
       const { stance, sentiment, split } = dominantStance(items);
       const activityScore = Math.round(clamp((activityRaw / maxActivity) * 100, 0, 100));
       const topTickers = topTickersOf(items, 4);
-      const mood = moodFor(sub.name, stance, activityScore, topTickers);
+      const mood = moodFor(name, stance, activityScore, topTickers);
       const recentPosts = [...posts]
         .sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt))
         .slice(0, 5);
@@ -191,7 +198,7 @@ function buildSubredditMetrics(
         .slice(0, 5);
 
       return {
-        subreddit: displayName(sub.name),
+        subreddit: displayName(name),
         activityScore,
         mentions: items.length,
         changePct: windowMomentum(items),
@@ -200,7 +207,7 @@ function buildSubredditMetrics(
         sentiment,
         stance,
         sentimentSplit: split,
-        explanation: explain(sub.name, mood, posts.length, comments.length),
+        explanation: explain(name, mood, posts.length, comments.length),
         recentPosts,
         recentComments,
       } satisfies SubredditPulseMetric;
@@ -347,9 +354,10 @@ function buildTopMentioned(items: SocialPostItem[], limit: number): TopMentioned
 function buildHeatmap(
   bySub: Map<string, SocialPostItem[]>,
   emerging: EmergingTickerMetric[],
+  scope: readonly string[],
 ): PulseHeatmap {
   const tickers = emerging.slice(0, 6).map((e) => e.ticker);
-  const subs = TRACKED_SUBREDDITS.map((s) => s.name);
+  const subs = [...scope];
 
   // Raw per-cell mention counts, normalized to 0..100 by the global max.
   const counts: number[][] = tickers.map((ticker) =>
@@ -390,22 +398,40 @@ function pulseLabel(score: number): { label: string; description: string } {
   };
 }
 
-/** Build the full aggregate from normalized items. */
+/**
+ * Build the full aggregate from normalized items.
+ *
+ * `subreddits` restricts EVERY figure — overall score, per-community rows,
+ * emerging tickers, divergence, heatmap and top-mentioned — to that set of
+ * communities. Items from communities outside it are dropped before any
+ * counting, so an unselected community can never influence an aggregate.
+ * Omit it (or pass an empty list) to use all tracked communities.
+ */
 export function buildSubredditPulse(
   items: SocialPostItem[],
   _timeframe: PulseTimeframe,
+  selected?: readonly string[],
 ): PulseAggregate {
+  const scope = selected?.length ? selected : TRACKED_SUBREDDIT_NAMES;
+  const inScope = new Set(scope.map((s) => s.toLowerCase()));
+
+  // Group by CANONICAL name so casing drift in stored rows still lands in the
+  // right bucket (and still renders as `r/ValueInvesting`, not `r/valueinvesting`).
   const bySub = new Map<string, SocialPostItem[]>();
+  const scoped: SocialPostItem[] = [];
   for (const it of items) {
-    if (!bySub.has(it.subreddit)) bySub.set(it.subreddit, []);
-    bySub.get(it.subreddit)!.push(it);
+    const canonical = normalizeSubreddit(it.subreddit);
+    if (!canonical || !inScope.has(canonical.toLowerCase())) continue;
+    scoped.push(it);
+    if (!bySub.has(canonical)) bySub.set(canonical, []);
+    bySub.get(canonical)!.push(it);
   }
 
-  const subreddits = buildSubredditMetrics(bySub);
-  const emergingTickers = buildEmerging(items);
+  const subreddits = buildSubredditMetrics(bySub, scope);
+  const emergingTickers = buildEmerging(scoped);
   const divergence = buildDivergence(bySub);
-  const heatmap = buildHeatmap(bySub, emergingTickers);
-  const topMentioned = buildTopMentioned(items, 25);
+  const heatmap = buildHeatmap(bySub, emergingTickers, scope);
+  const topMentioned = buildTopMentioned(scoped, 25);
 
   // Weight each community's stance tilt by its activity.
   const totalActivity = subreddits.reduce((s, r) => s + r.activityScore, 0) || 1;

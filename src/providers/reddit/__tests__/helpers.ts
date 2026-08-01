@@ -17,13 +17,37 @@ import type {
  */
 
 for (const [key, value] of Object.entries({
-  DATABASE_URL: "postgresql://test:test@localhost:5432/test",
   SUPABASE_URL: "https://test.supabase.co",
   SUPABASE_SERVICE_ROLE_KEY: "test-service-role-key",
   NODE_ENV: "test",
 })) {
   if (!process.env[key]) process.env[key] = value;
 }
+
+/**
+ * DATABASE_URL is FORCED to an unreachable local address.
+ *
+ * The developer `.env` points at the real Supabase instance. Without this
+ * override, any test that reaches a Prisma call would read — or write — the
+ * production database. A refused connection is the correct outcome for a unit
+ * test: it proves the persistence path was taken without touching real data.
+ *
+ * Must run before `lib/prisma.ts` is evaluated; test files import this module
+ * first, and ESM finishes evaluating it before their remaining imports.
+ */
+process.env.DATABASE_URL = "postgresql://test:test@127.0.0.1:1/testdb";
+
+/**
+ * Retry/backoff knobs are FORCED, not defaulted.
+ *
+ * Code paths that resolve the process configuration themselves (the scanner
+ * controller does) would otherwise inherit the real `.env` — 3 retries with a
+ * 5s base backoff turns a single failure-path assertion into a 35-second test.
+ * Tests assert behaviour, never patience.
+ */
+process.env.REDDIT_PROVIDER_MAX_RETRIES = "0";
+process.env.REDDIT_PROVIDER_RETRY_DELAY_MS = "100";
+process.env.REDDIT_PROVIDER_TIMEOUT_MS = "2000";
 
 /** A config built from explicit values only — never from the real environment. */
 export function testConfig(
@@ -169,24 +193,47 @@ export async function captureConsole(
   return lines.join("\n");
 }
 
-/** Replace global fetch with a scripted responder; returns the URLs requested. */
+/** One recorded outgoing request: enough to assert on URL *and* payload. */
+export interface StubbedRequest {
+  url: string;
+  method: string;
+  /** Parsed JSON body, or undefined for a bodyless request. */
+  body: unknown;
+}
+
+/** Replace global fetch with a scripted responder; records what was sent. */
 export function stubFetch(
   handler: (url: string, init?: RequestInit) => { status?: number; body?: unknown },
-): { urls: string[]; restore: () => void } {
+): { urls: string[]; requests: StubbedRequest[]; restore: () => void } {
   const urls: string[] = [];
+  const requests: StubbedRequest[] = [];
   const original = globalThis.fetch;
 
   globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
     const url = typeof input === "string" ? input : String(input);
     urls.push(url);
+    let parsed: unknown;
+    if (typeof init?.body === "string") {
+      try {
+        parsed = JSON.parse(init.body);
+      } catch {
+        parsed = init.body;
+      }
+    }
+    requests.push({ url, method: init?.method ?? "GET", body: parsed });
+
     const { status = 200, body = {} } = handler(url, init);
+    // `text()` as well as `json()`: the HTTP client reads error bodies as text
+    // before parsing them, exactly as a real Response allows.
+    const serialized = typeof body === "string" ? body : JSON.stringify(body);
     return {
       ok: status >= 200 && status < 300,
       status,
       headers: { get: () => null },
       json: async () => body,
+      text: async () => serialized,
     } as unknown as Response;
   }) as typeof globalThis.fetch;
 
-  return { urls, restore: () => { globalThis.fetch = original; } };
+  return { urls, requests, restore: () => { globalThis.fetch = original; } };
 }

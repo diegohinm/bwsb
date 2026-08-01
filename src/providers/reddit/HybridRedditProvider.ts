@@ -6,6 +6,10 @@ import {
   AllRedditProvidersFailedError,
   sanitizeProviderError,
 } from "./providerErrors.js";
+import {
+  toObservedError,
+  type ProviderCallObserver,
+} from "./providerObserver.js";
 import type { RedditDataProvider } from "./RedditDataProvider.js";
 import type {
   NormalizedRedditComment,
@@ -42,6 +46,7 @@ export class HybridRedditProvider implements RedditDataProvider {
   private readonly providers: RedditDataProvider[];
   private readonly preferredSource: RedditProviderName;
   private readonly deduplicate: boolean;
+  private readonly observer: ProviderCallObserver | undefined;
 
   constructor(
     providers: RedditDataProvider[],
@@ -49,6 +54,12 @@ export class HybridRedditProvider implements RedditDataProvider {
       preferredSource: RedditProviderName;
       /** REDDIT_DEDUPLICATE_RESULTS. Off is for debugging only. */
       deduplicate?: boolean;
+      /**
+       * Per-provider outcome reporter. Used by the internal scanner page to
+       * show a side-by-side comparison; production ingestion leaves it unset.
+       * Purely observational — it can never change what is returned.
+       */
+      observer?: ProviderCallObserver;
     },
   ) {
     if (providers.length === 0) {
@@ -57,6 +68,7 @@ export class HybridRedditProvider implements RedditDataProvider {
     this.providers = providers;
     this.preferredSource = options.preferredSource;
     this.deduplicate = options.deduplicate ?? true;
+    this.observer = options.observer;
     this.name = options.preferredSource;
   }
 
@@ -105,8 +117,32 @@ export class HybridRedditProvider implements RedditDataProvider {
     label: string,
     call: (provider: RedditDataProvider) => Promise<T[]>,
   ): Promise<T[]> {
+    // Each call is timed individually so the observer can report per-provider
+    // latency; the timing wrapper never alters the settled outcome.
     const settled = await Promise.allSettled(
-      this.providers.map((provider) => call(provider)),
+      this.providers.map(async (provider) => {
+        const startedAt = Date.now();
+        try {
+          const value = await call(provider);
+          this.observer?.({
+            provider: provider.name,
+            success: true,
+            receivedCount: value.length,
+            durationMs: Date.now() - startedAt,
+            error: null,
+          });
+          return value;
+        } catch (error) {
+          this.observer?.({
+            provider: provider.name,
+            success: false,
+            receivedCount: 0,
+            durationMs: Date.now() - startedAt,
+            error: toObservedError(error),
+          });
+          throw error;
+        }
+      }),
     );
 
     const combined: T[] = [];

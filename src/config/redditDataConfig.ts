@@ -96,7 +96,12 @@ export interface RedditDataConfig {
   activeProviders: RedditProviderName[];
 }
 
-const DEFAULT_MINDCASE_BASE_URL = "https://api.mindcase.co";
+/**
+ * Includes the API version: every Mindcase path this app calls
+ * (`/agents/reddit/posts/run`, `/jobs/{id}/results`) hangs off the versioned
+ * root, and a base URL without it produces 404s and 422s.
+ */
+const DEFAULT_MINDCASE_BASE_URL = "https://api.mindcase.co/api/v1";
 const DEFAULT_ARCTIC_SHIFT_BASE_URL = "https://arctic-shift.photon-reddit.com";
 
 /** Environment source: anything with string-ish values keyed by name. */
@@ -156,6 +161,19 @@ function url(source: EnvSource, key: string, fallback: string): string {
     throw new RedditDataConfigError(`${key} must be a valid absolute URL.`);
   }
   return value.replace(/\/+$/, "");
+}
+
+/**
+ * Mindcase's API root, guaranteed to carry the version segment exactly once.
+ *
+ * Operators set MINDCASE_BASE_URL both ways — `https://api.mindcase.co` and
+ * `https://api.mindcase.co/api/v1`. Both must end up at the same place: the
+ * bare form otherwise misses the version, and blindly appending would produce
+ * `/api/v1/api/v1/agents/reddit/posts/run`.
+ */
+function mindcaseBaseUrl(source: EnvSource): string {
+  const base = url(source, "MINDCASE_BASE_URL", DEFAULT_MINDCASE_BASE_URL);
+  return /\/api\/v\d+$/i.test(base) ? base : `${base}/api/v1`;
 }
 
 function providerName(
@@ -233,7 +251,7 @@ export function buildRedditDataConfig(
       ...(raw(source, "MINDCASE_API_KEY")
         ? { apiKey: raw(source, "MINDCASE_API_KEY") as string }
         : {}),
-      baseUrl: url(source, "MINDCASE_BASE_URL", DEFAULT_MINDCASE_BASE_URL),
+      baseUrl: mindcaseBaseUrl(source),
       pollIntervalMs: int(source, "MINDCASE_POLL_INTERVAL_MS", 5_000, 250, 60_000),
       // MINDCASE_MAX_POLLS is the legacy name used by the social provider; it is
       // honoured so a single deployment does not need both variables.

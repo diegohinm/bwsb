@@ -235,12 +235,18 @@ export async function saveTrendingTickers(
  * Normalized items (posts + comments) inside a time window, newest first.
  * `ticker` restricts to items mentioning that symbol — `hasSome` compiles to the
  * array-overlap operator, which is what the GIN index on `tickers` serves.
+ *
+ * `subreddits` restricts to a set of communities. The narrowing happens in SQL
+ * (`subreddit IN (…)`), NOT after the fact in JS — a filtered Pulse request must
+ * not pay to read rows it will discard, and must not have its `limit` consumed
+ * by rows from unselected communities.
  */
 export async function readSocialItems(params: {
   sinceIso: string;
   limit?: number;
   ticker?: string;
   subreddit?: string;
+  subreddits?: readonly string[];
 }): Promise<SocialPostItem[]> {
   const limit = Math.min(2_000, params.limit ?? 1_000);
 
@@ -250,6 +256,7 @@ export async function readSocialItems(params: {
     postedAt: { gte: new Date(params.sinceIso) },
     ...(params.ticker ? { tickers: { hasSome: [params.ticker.toUpperCase()] } } : {}),
     ...(params.subreddit ? { subreddit: params.subreddit } : {}),
+    ...(params.subreddits?.length ? { subreddit: { in: [...params.subreddits] } } : {}),
   };
 
   const [posts, comments] = await Promise.all([

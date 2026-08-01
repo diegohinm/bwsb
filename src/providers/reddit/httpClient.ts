@@ -15,6 +15,8 @@ import type { RedditProviderName } from "./types.js";
 
 /** Never sleep longer than this on a single backoff, whatever the server says. */
 const MAX_BACKOFF_MS = 30_000;
+/** Upper bound on how much of an error body is kept for diagnosis. */
+const MAX_ERROR_BODY_CHARS = 4_000;
 
 export interface RequestJsonOptions {
   provider: RedditProviderName;
@@ -51,27 +53,58 @@ export function redactUrl(value: string): string {
   }
 }
 
+/**
+ * Read an error response's body without ever letting it break the error path.
+ *
+ * A rejected request is exactly when the body matters most — a 422 says which
+ * field it disliked — but the body may be empty, truncated, HTML, or already
+ * consumed. Every one of those returns `undefined` rather than throwing over
+ * the top of the real HTTP error.
+ */
+async function readErrorBody(response: Response): Promise<unknown> {
+  try {
+    const raw = (await response.text()).slice(0, MAX_ERROR_BODY_CHARS);
+    if (raw.trim().length === 0) return undefined;
+    try {
+      return JSON.parse(raw);
+    } catch {
+      return raw;
+    }
+  } catch {
+    return undefined;
+  }
+}
+
 /** 2s → 4s → 8s … capped, based on the caller's configured base delay. */
 function backoffMs(base: number, attempt: number): number {
   return Math.min(MAX_BACKOFF_MS, base * 2 ** attempt);
 }
 
 /**
- * How long to wait after a 429. Prefers `Retry-After` (seconds or HTTP-date)
- * and falls back to exponential backoff. Always clamped, so a hostile or odd
- * header can never park the worker for minutes.
+ * `Retry-After` in seconds, from either supported form (delta-seconds or an
+ * HTTP-date). Undefined when the header is absent or unparseable.
+ *
+ * Kept UNCLAMPED: callers that sleep clamp it themselves, while the Arctic
+ * Shift worker persists the real value — an upstream asking for ten minutes
+ * means ten minutes, not thirty seconds.
+ */
+export function parseRetryAfterSeconds(header: string | null): number | undefined {
+  if (!header) return undefined;
+  const seconds = Number(header.trim());
+  if (Number.isFinite(seconds) && seconds >= 0) return seconds;
+  const date = Date.parse(header);
+  if (!Number.isNaN(date)) return Math.max(0, (date - Date.now()) / 1000);
+  return undefined;
+}
+
+/**
+ * How long to wait after a 429. Prefers `Retry-After` and falls back to
+ * exponential backoff. Always clamped, so a hostile or odd header can never
+ * park the worker for minutes.
  */
 function retryAfterMs(header: string | null, base: number, attempt: number): number {
-  if (header) {
-    const seconds = Number(header.trim());
-    if (Number.isFinite(seconds) && seconds >= 0) {
-      return Math.min(MAX_BACKOFF_MS, seconds * 1000);
-    }
-    const date = Date.parse(header);
-    if (!Number.isNaN(date)) {
-      return Math.min(MAX_BACKOFF_MS, Math.max(0, date - Date.now()));
-    }
-  }
+  const seconds = parseRetryAfterSeconds(header);
+  if (seconds !== undefined) return Math.min(MAX_BACKOFF_MS, seconds * 1000);
   return backoffMs(base, attempt);
 }
 
@@ -83,6 +116,7 @@ function retryAfterMs(header: string | null, base: number, attempt: number): num
  *   5xx                        → server      (retried, then thrown)
  *   abort                      → timeout     (retried, then thrown)
  *   fetch rejection            → network     (retried, then thrown)
+ *   422                        → upstream_validation (NOT retried; body attached)
  *   other 4xx                  → client      (NOT retried — our request is wrong)
  *   unparseable body           → invalid_response
  */
@@ -124,11 +158,15 @@ export async function requestJson<T>(options: RequestJsonOptions): Promise<T> {
         console.warn(
           `[${providerLabel(provider)}] Rate limited status=429 retry=${attempt + 1} ${where}url=${safeUrl}`,
         );
+        const retryAfterSeconds = parseRetryAfterSeconds(
+          response.headers.get("retry-after"),
+        );
         lastError = new RedditProviderError(
           provider,
           "rate_limit",
           `${method} ${safeUrl} -> 429`,
           429,
+          retryAfterSeconds !== undefined ? { retryAfterSeconds } : {},
         );
         if (isLastAttempt) throw lastError;
         await sleep(retryAfterMs(response.headers.get("retry-after"), retryDelayMs, attempt));
@@ -150,11 +188,15 @@ export async function requestJson<T>(options: RequestJsonOptions): Promise<T> {
       if (!response.ok) {
         // 4xx: our request is the problem. Retrying — here or on another
         // provider — would fail identically, so fail fast and loudly.
+        //
+        // The body is attached (never logged here) so the caller can turn
+        // "422" into "which field the upstream refused".
         throw new RedditProviderError(
           provider,
-          "client",
+          response.status === 422 ? "upstream_validation" : "client",
           `${method} ${safeUrl} -> ${response.status}`,
           response.status,
+          { details: await readErrorBody(response) },
         );
       }
 
@@ -169,9 +211,15 @@ export async function requestJson<T>(options: RequestJsonOptions): Promise<T> {
       }
     } catch (error) {
       if (error instanceof RedditProviderError) {
-        // `client` and `invalid_response` are final; the retryable kinds were
-        // already re-thrown above on the last attempt.
-        if (error.kind === "client" || error.kind === "invalid_response") throw error;
+        // `client`, `upstream_validation` and `invalid_response` are final; the
+        // retryable kinds were already re-thrown above on the last attempt.
+        if (
+          error.kind === "client" ||
+          error.kind === "upstream_validation" ||
+          error.kind === "invalid_response"
+        ) {
+          throw error;
+        }
         lastError = error;
         if (isLastAttempt) throw error;
         continue;

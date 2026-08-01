@@ -5,6 +5,7 @@ import {
 } from "../../repositories/socialSnapshots.repository.js";
 import { mockSocialDataProvider } from "./socialDataProvider.factory.js";
 import { assemblePulseResponse, assembleTickerFeed } from "./socialData.assemble.js";
+import { TRACKED_SUBREDDIT_NAMES } from "./subreddits.js";
 import {
   PULSE_TIMEFRAME_MS,
   type PulseTimeframe,
@@ -48,33 +49,65 @@ function windowStart(timeframe: PulseTimeframe): string {
 /**
  * Cross-subreddit pulse rebuilt from stored items. Falls back to labeled demo
  * data when the worker has published nothing for this window.
+ *
+ * `subreddits` (already normalized+validated by the route) scopes the whole
+ * response: the DB read, every aggregate and the cache entry. Omitted means all
+ * tracked communities.
  */
 export async function getStoredSubredditPulse(params: {
   timeframe: PulseTimeframe;
   q?: string;
+  subreddits?: readonly string[];
 }): Promise<SubredditPulseResponse> {
-  const key = `pulse-db:${params.timeframe}:${params.q ?? ""}`;
+  const selected = params.subreddits?.length
+    ? [...params.subreddits]
+    : [...TRACKED_SUBREDDIT_NAMES];
+  const isSubset = selected.length < TRACKED_SUBREDDIT_NAMES.length;
+
+  // Sorted, so `stocks,wallstreetbets` and `wallstreetbets,stocks` are one entry.
+  const key =
+    `pulse-db:${params.timeframe}:${[...selected].sort().join(",")}:q=${params.q ?? ""}`;
   const cached = memoryCache.get<SubredditPulseResponse>(key);
   if (cached) return cached;
 
   const [items, meta] = await Promise.all([
-    readSocialItems({ sinceIso: windowStart(params.timeframe), limit: MAX_ITEMS }),
+    readSocialItems({
+      sinceIso: windowStart(params.timeframe),
+      limit: MAX_ITEMS,
+      subreddits: selected,
+    }),
     readLatestPulseMeta(params.timeframe),
   ]);
 
   let response: SubredditPulseResponse;
-  if (items.length === 0) {
-    response = await mockSocialDataProvider.getSubredditPulse(params);
+  // Nothing stored at all → demo data, as before. But when a SUBSET is selected
+  // and the worker has published (meta exists), an empty result is a real answer
+  // — "these communities were quiet" — not a reason to show demo data from
+  // communities the user deselected.
+  if (items.length === 0 && !(isSubset && meta)) {
+    response = await mockSocialDataProvider.getSubredditPulse({
+      timeframe: params.timeframe,
+      ...(params.q ? { q: params.q } : {}),
+      subreddits: selected,
+    });
     response.warning = WARN_NO_DATA;
   } else {
-    response = assemblePulseResponse(items, params.timeframe, params.q, {
-      provider: (meta?.provider ?? items[0].provider) as SubredditPulseResponse["provider"],
-      source: meta?.source ?? items[0].source,
-      isMock: meta?.isMock ?? items[0].provider === "mock",
-      // The worker's snapshot time, so the UI shows when data was last ingested.
-      updatedAt: meta?.snapshotAt ?? new Date().toISOString(),
-      ...(meta?.warning ? { warning: meta.warning } : {}),
-    });
+    response = assemblePulseResponse(
+      items,
+      params.timeframe,
+      params.q,
+      {
+        provider: (meta?.provider ??
+          items[0]?.provider ??
+          "mock") as SubredditPulseResponse["provider"],
+        source: meta?.source ?? items[0]?.source ?? "mock",
+        isMock: meta?.isMock ?? items[0]?.provider === "mock",
+        // The worker's snapshot time, so the UI shows when data was last ingested.
+        updatedAt: meta?.snapshotAt ?? new Date().toISOString(),
+        ...(meta?.warning ? { warning: meta.warning } : {}),
+      },
+      selected,
+    );
   }
 
   memoryCache.set(key, response, READ_CACHE_SECONDS);

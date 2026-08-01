@@ -13,7 +13,7 @@ import {
   type SaveResult,
 } from "../repositories/redditContent.repository.js";
 import { extractTickersFrom } from "./social/tickerExtractor.service.js";
-import { TRACKED_SUBREDDIT_NAMES } from "./social/subreddits.js";
+import { redditConfig } from "../config/reddit.config.js";
 
 /**
  * Reddit ingestion — fetch, detect tickers, persist.
@@ -30,13 +30,68 @@ import { TRACKED_SUBREDDIT_NAMES } from "./social/subreddits.js";
  * when every provider is down.
  */
 
+export interface PersistPostsResult {
+  insertedCount: number;
+  updatedCount: number;
+  failedCount: number;
+}
+
+/**
+ * Persist normalized posts — the ONE way anything writes Reddit content.
+ *
+ * Both the scheduled worker and the internal scanner page (`persist=true`) call
+ * this, so the upsert contract is defined once: keyed on the Reddit id, never
+ * duplicating, never overwriting a stored body with null, accumulating
+ * `sources`, refreshing `lastSeenAt`. Ticker detection runs here too, so a post
+ * saved from the test page is indexed exactly like one saved by the worker.
+ */
+export async function persistPosts(
+  posts: NormalizedRedditPost[],
+  options: { storeRawData?: boolean } = {},
+): Promise<PersistPostsResult> {
+  if (posts.length === 0) {
+    return { insertedCount: 0, updatedCount: 0, failedCount: 0 };
+  }
+
+  const config = getRedditDataConfig();
+  const tickersByPost = detectTickers(posts).tickersByPost;
+
+  const result = await saveRedditPosts(posts, {
+    storeRawData: options.storeRawData ?? config.storeSourceMetadata,
+    tickersByPost,
+  });
+
+  return {
+    insertedCount: result.created,
+    updatedCount: result.updated,
+    failedCount: result.failed,
+  };
+}
+
+/** Cashtags / allowlisted symbols per post, plus the total detected. */
+function detectTickers(posts: NormalizedRedditPost[]): {
+  tickersByPost: Map<string, string[]>;
+  total: number;
+} {
+  const tickersByPost = new Map<string, string[]>();
+  let total = 0;
+  for (const post of posts) {
+    const tickers = extractTickersFrom(post.title, post.body);
+    if (tickers.length > 0) {
+      tickersByPost.set(post.externalId, tickers);
+      total += tickers.length;
+    }
+  }
+  return { tickersByPost, total };
+}
+
 /** How far back to look on the very first run for a subreddit. */
 const COLD_START_WINDOW_MS = 24 * 60 * 60 * 1000;
 /** Re-fetch a little before the newest stored post so nothing slips the gap. */
 const WATERMARK_OVERLAP_MS = 5 * 60 * 1000;
 
 export interface IngestPostsOptions {
-  /** Defaults to the tracked communities. */
+  /** Defaults to `REDDIT_SUBREDDITS` — never a list written in this file. */
   subreddits?: readonly string[];
   /** Posts requested per subreddit. */
   limit?: number;
@@ -78,7 +133,8 @@ export async function ingestRedditPosts(
 ): Promise<IngestionSummary> {
   const config = getRedditDataConfig();
   const provider = options.provider ?? getRedditDataProvider();
-  const subreddits = options.subreddits ?? TRACKED_SUBREDDIT_NAMES;
+  // One list for every provider — Arctic Shift, Mindcase, hybrid, fallback.
+  const subreddits = options.subreddits ?? redditConfig.subreddits;
   const limit = options.limit ?? 200;
 
   const failed: string[] = [];
@@ -103,15 +159,7 @@ export async function ingestRedditPosts(
   }
 
   // Detect tickers before writing so mentions and posts land in one pass.
-  const tickersByPost = new Map<string, string[]>();
-  let tickersDetected = 0;
-  for (const post of allPosts) {
-    const tickers = extractTickersFrom(post.title, post.body);
-    if (tickers.length > 0) {
-      tickersByPost.set(post.externalId, tickers);
-      tickersDetected += tickers.length;
-    }
-  }
+  const { tickersByPost, total: tickersDetected } = detectTickers(allPosts);
 
   const postResult = await saveRedditPosts(allPosts, {
     storeRawData: config.storeSourceMetadata,

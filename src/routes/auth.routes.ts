@@ -6,6 +6,7 @@ import {
   isRedditOAuthConfigured,
   isGoogleOAuthConfigured,
 } from "../config/env.js";
+import { isAdminEmail } from "../config/adminAccess.js";
 import { ok, fail, asyncHandler } from "../lib/response.js";
 import { rateLimit } from "../middleware/rateLimit.js";
 import {
@@ -216,10 +217,21 @@ authRouter.post(
 /**
  * GET /auth/me
  * Returns the current user (from the yt_session cookie) or null.
+ *
+ * `isAdmin` is DERIVED here from the ADMIN_EMAILS allowlist — it is not stored
+ * on the account (there is no role column). The frontend uses it only to decide
+ * whether to show internal tooling; every internal endpoint re-checks server
+ * side, so a client that lies about this gains nothing.
  */
 authRouter.get(
   "/me",
-  asyncHandler(async (req, res) => ok(res, { user: req.user ?? null })),
+  asyncHandler(async (req, res) =>
+    ok(res, {
+      user: req.user
+        ? { ...req.user, isAdmin: isAdminEmail(req.user.email) }
+        : null,
+    }),
+  ),
 );
 
 /**

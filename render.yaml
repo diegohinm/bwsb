@@ -45,6 +45,10 @@ services:
       # will serve and which ?session= values it rejects.
       - key: ENABLE_EXTENDED_HOURS
         value: "false"
+      # Admin access for internal tooling (/admin/reddit-scanner). Empty means
+      # nobody is an admin and internal pages are development-only.
+      - key: ADMIN_EMAILS
+        sync: false
       # NO MINDCASE_* / DATABENTO_* here on purpose: with SERVICE_ROLE=api the
       # process refuses provider calls, so keys would be dead weight and extra
       # exposure. The API answers from the worker's snapshots.
@@ -122,6 +126,38 @@ services:
         value: https://arctic-shift.photon-reddit.com
       - key: ARCTIC_SHIFT_REQUEST_DELAY_MS
         value: "1000"
+
+      # ── THE subreddit list ───────────────────────────────────────────────
+      # One variable for every provider; the order is the worker's rotation
+      # order. Changing it requires a worker restart.
+      - key: REDDIT_SUBREDDITS
+        value: wallstreetbets,stocks,options,investing,pennystocks
+
+      # ── Arctic Shift paced worker ────────────────────────────────────────
+      # ONE request every five minutes for the whole system, round-robin over
+      # REDDIT_SUBREDDITS: 12 requests/hour, each community roughly every 25
+      # minutes. While this is true it REPLACES REDDIT_INGESTION_ENABLED as the
+      # Reddit path — running both would multiply requests by the list length.
+      #
+      # Two instances of this service are safe: they serialize through a lease
+      # in reddit_worker_state, and the request log that enforces the hourly
+      # ceiling lives in the same row.
+      - key: ARCTIC_SHIFT_ENABLED
+        value: "false"
+      - key: REDDIT_POLL_INTERVAL_MS
+        value: "300000"
+      - key: REDDIT_POST_LIMIT
+        value: "100"
+      - key: REDDIT_INITIAL_LOOKBACK_MINUTES
+        value: "30"
+      - key: REDDIT_CURSOR_OVERLAP_SECONDS
+        value: "120"
+      - key: ARCTIC_SHIFT_REQUEST_TIMEOUT_MS
+        value: "30000"
+      - key: ARCTIC_SHIFT_MAX_RETRIES
+        value: "3"
+      - key: ARCTIC_SHIFT_RETRY_BASE_DELAY_MS
+        value: "5000"
 
       # ── Market ingestion (Databento) ─────────────────────────────────────
       - key: MARKET_DATA_PROVIDER

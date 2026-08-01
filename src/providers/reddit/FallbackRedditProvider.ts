@@ -2,6 +2,10 @@ import {
   isFallbackEligibleError,
   sanitizeProviderError,
 } from "./providerErrors.js";
+import {
+  toObservedError,
+  type ProviderCallObserver,
+} from "./providerObserver.js";
 import type { RedditDataProvider } from "./RedditDataProvider.js";
 import type {
   NormalizedRedditComment,
@@ -37,15 +41,24 @@ export class FallbackRedditProvider implements RedditDataProvider {
   private readonly primary: RedditDataProvider;
   private readonly fallback: RedditDataProvider;
   private readonly fallbackOnEmpty: boolean;
+  private readonly observer: ProviderCallObserver | undefined;
 
   constructor(
     primary: RedditDataProvider,
     fallback: RedditDataProvider,
-    options: { fallbackOnEmpty?: boolean } = {},
+    options: {
+      fallbackOnEmpty?: boolean;
+      /**
+       * Per-provider outcome reporter for the internal scanner page. Purely
+       * observational; production ingestion leaves it unset.
+       */
+      observer?: ProviderCallObserver;
+    } = {},
   ) {
     this.primary = primary;
     this.fallback = fallback;
     this.fallbackOnEmpty = options.fallbackOnEmpty ?? true;
+    this.observer = options.observer;
     this.name = primary.name;
   }
 
@@ -70,8 +83,9 @@ export class FallbackRedditProvider implements RedditDataProvider {
     label: string,
     call: (provider: RedditDataProvider) => Promise<T[]>,
   ): Promise<T[]> {
+    const startedAt = Date.now();
     try {
-      const results = await call(this.primary);
+      const results = await this.observed(this.primary, startedAt, call);
 
       if (results.length > 0) {
         console.log(
@@ -114,10 +128,38 @@ export class FallbackRedditProvider implements RedditDataProvider {
     console.log(
       `[FallbackRedditProvider] Using fallback provider=${this.fallback.name}`,
     );
-    const results = await call(this.fallback);
+    const results = await this.observed(this.fallback, Date.now(), call);
     console.log(
       `[FallbackRedditProvider] Fallback provider answered provider=${this.fallback.name} ${label}=${results.length}`,
     );
     return results;
+  }
+
+  /** Run one provider, reporting its outcome without altering it. */
+  private async observed<T>(
+    provider: RedditDataProvider,
+    startedAt: number,
+    call: (provider: RedditDataProvider) => Promise<T[]>,
+  ): Promise<T[]> {
+    try {
+      const value = await call(provider);
+      this.observer?.({
+        provider: provider.name,
+        success: true,
+        receivedCount: value.length,
+        durationMs: Date.now() - startedAt,
+        error: null,
+      });
+      return value;
+    } catch (error) {
+      this.observer?.({
+        provider: provider.name,
+        success: false,
+        receivedCount: 0,
+        durationMs: Date.now() - startedAt,
+        error: toObservedError(error),
+      });
+      throw error;
+    }
   }
 }

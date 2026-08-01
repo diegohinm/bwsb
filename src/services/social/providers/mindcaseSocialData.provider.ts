@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 
 import { env } from "../../../config/env.js";
 import { assertProviderCallsAllowed } from "../../../config/serviceRole.js";
-import { TRACKED_SUBREDDIT_NAMES } from "../subreddits.js";
+import { redditConfig } from "../../../config/reddit.config.js";
 import { classifySocialItem } from "../socialClassifier.service.js";
 import { extractTickersFrom } from "../tickerExtractor.service.js";
 import {
@@ -144,7 +144,7 @@ export class MindcaseSocialDataProvider implements SocialDataProvider {
     if (!this.configured) throw new MindcaseNotConfiguredError();
     const subs = params.subreddits?.length
       ? params.subreddits
-      : [...TRACKED_SUBREDDIT_NAMES];
+      : [...redditConfig.subreddits];
     const sweep = await this.fetchManySubreddits(subs, params.q);
     assertUsable(sweep);
     return assemblePulseResponse(
@@ -152,6 +152,7 @@ export class MindcaseSocialDataProvider implements SocialDataProvider {
       params.timeframe,
       params.q,
       this.meta(partialWarning(sweep)),
+      params.subreddits,
     );
   }
 
@@ -169,7 +170,7 @@ export class MindcaseSocialDataProvider implements SocialDataProvider {
     const subs =
       params.subreddit && params.subreddit !== "all"
         ? [params.subreddit.replace(/^r\//i, "")]
-        : [...TRACKED_SUBREDDIT_NAMES];
+        : [...redditConfig.subreddits];
     // Search each community for the ticker cashtag.
     const sweep = await this.fetchManySubreddits(subs, `$${params.ticker}`);
     assertUsable(sweep);
@@ -191,7 +192,7 @@ export class MindcaseSocialDataProvider implements SocialDataProvider {
     if (!this.configured) throw new MindcaseNotConfiguredError();
     const subs = params.subreddits?.length
       ? params.subreddits
-      : [...TRACKED_SUBREDDIT_NAMES];
+      : [...redditConfig.subreddits];
     return this.fetchManySubreddits(subs, params.keyword);
   }
 

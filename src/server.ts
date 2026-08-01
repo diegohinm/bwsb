@@ -27,11 +27,13 @@ import { screenerRouter } from "./routes/screener.routes.js";
 import { researchRouter } from "./routes/research.routes.js";
 import { searchRouter } from "./routes/search.routes.js";
 import { pulseRouter } from "./routes/pulse.routes.js";
+import { wsbRouter } from "./routes/wsb.routes.js";
 import { dashboardRouter } from "./routes/dashboard.routes.js";
 import { marketDataRouter } from "./routes/marketData.routes.js";
 import { productRouter } from "./routes/product.routes.js";
 import { personalRouter } from "./routes/personal.routes.js";
 import { internalRedditRouter } from "./routes/internalReddit.routes.js";
+import { internalRedditScannerRouter } from "./routes/internalRedditScannerRoutes.js";
 import { notFound } from "./middleware/notFound.js";
 import { errorHandler } from "./middleware/errorHandler.js";
 
@@ -93,6 +95,9 @@ app.use("/api", researchRouter);
 app.use("/api", searchRouter);
 // Public cross-subreddit Pulse (social data provider, no auth).
 app.use("/api", pulseRouter);
+// Public WSB workspace: portfolio snapshots + banbets. Reads the database only;
+// /wsb/banbets/me applies requireAuth inside the router.
+app.use("/api", wsbRouter);
 app.use("/api", dashboardRouter);
 // Public market data (equities / options; license-gated, no auth). Extended
 // hours are served only when ENABLE_EXTENDED_HOURS is on — off by default,
@@ -105,6 +110,8 @@ app.use("/api", redditVerificationRouter);
 app.use("/admin", adminRedditVerificationRouter);
 // Internal Reddit provider diagnostics (x-admin-secret applied inside).
 app.use("/api", internalRedditRouter);
+// Internal Reddit scanner test harness (dev-open, admin-only in production).
+app.use("/api/internal/reddit/scanner", internalRedditScannerRouter);
 // Protected personal features (requireAuth applied inside the router). Mounted
 // after the public routers so public routes are handled without auth.
 app.use("/api", personalRouter);

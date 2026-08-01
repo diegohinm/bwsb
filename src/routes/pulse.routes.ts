@@ -14,7 +14,10 @@ import type {
   SocialFeedSort,
   SocialSentiment,
 } from "../services/social/index.js";
-import { TRACKED_SUBREDDITS } from "../services/social/subreddits.js";
+import {
+  TRACKED_SUBREDDITS,
+  parseSubredditFilter,
+} from "../services/social/subreddits.js";
 
 export const pulseRouter = Router();
 
@@ -34,12 +37,18 @@ function firstString(value: unknown): string | undefined {
 }
 
 /**
- * GET /api/pulse/subreddits?timeframe=1h|6h|24h|7d&q=
+ * GET /api/pulse/subreddits?timeframe=1h|6h|24h|7d&q=&subreddits=a,b,c
  *
- * Public, read-only. Normalized cross-subreddit trend data from the configured
- * social data provider, with graceful mock fallback. Never exposes provider
- * secrets. `data.isMock` + `data.warning` tell the client when to badge demo
- * data.
+ * Public, read-only. Normalized cross-subreddit trend data rebuilt from stored
+ * worker snapshots, with graceful mock fallback. Never exposes provider secrets.
+ * `data.isMock` + `data.warning` tell the client when to badge demo data.
+ *
+ * `subreddits` is a comma-separated community filter (`r/` prefix and casing
+ * tolerated). Unknown names are ignored rather than rejected, so a stale or
+ * hand-edited URL degrades to a wider selection instead of a 400; a filter that
+ * resolves to nothing means "all communities". Every figure in the response is
+ * recomputed from the surviving set — this is a database narrowing, and can
+ * never cause a provider/Mindcase call.
  */
 pulseRouter.get(
   "/pulse/subreddits",
@@ -53,7 +62,8 @@ pulseRouter.get(
       );
     }
     const q = firstString(req.query.q)?.trim() || undefined;
-    const data = await getSubredditPulse({ timeframe: raw, q });
+    const subreddits = parseSubredditFilter(firstString(req.query.subreddits));
+    const data = await getSubredditPulse({ timeframe: raw, q, subreddits });
     return ok(res, data);
   }),
 );
