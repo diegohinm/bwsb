@@ -201,6 +201,35 @@ const envSchema = z.object({
    * quota is involved and it can safely be shortened.
    */
   WSB_REFRESH_SECONDS: intEnv(900, 60, 86_400),
+  /**
+   * WORKER: seconds between Arena ranking runs. Both Arena jobs read stored
+   * data only, so this paces CPU and writes — no provider quota is involved.
+   */
+  ARENA_REFRESH_SECONDS: intEnv(900, 60, 86_400),
+
+  // ── Earnings calendar ──────────────────────────────────────────────────────
+  // Which earnings source the WORKER pulls report dates from. `none` is the
+  // default and leaves the calendar empty rather than inventing dates for real
+  // companies; `mock` is synthetic and refused in production; `fixture` reads
+  // the JSON file at EARNINGS_FIXTURE_PATH.
+  EARNINGS_DATA_PROVIDER: z.enum(["none", "mock", "fixture"]).default("none"),
+  EARNINGS_FIXTURE_PATH: z.string().optional(),
+  /**
+   * WORKER: seconds between earnings refreshes. Default 6h — earnings dates
+   * move on the scale of days, and the provider is metered. The floor is
+   * deliberately an hour: there is no legitimate reason to poll faster.
+   */
+  EARNINGS_REFRESH_SECONDS: intEnv(21_600, 3_600, 604_800),
+
+  // ── Discussion (realtime ticker feed) ──────────────────────────────────────
+  /**
+   * API: how often the change source looks for new social rows, in ms. This is
+   * a DATABASE poll, not a provider one — one pair of queries per tick for the
+   * whole server, and only while somebody has the tab open. The 2–5s target
+   * latency lives here; the floor stops it being turned into a hot loop.
+   */
+  DISCUSSION_POLL_MS: intEnv(3_000, 1_000, 60_000),
+
   // How long a social payload is cached before the provider is queried again.
   // SOCIAL_DATA_CACHE_TTL_SECONDS is the canonical name; SOCIAL_CACHE_TTL_SECONDS
   // is accepted as a legacy alias. Resolved into env.SOCIAL_CACHE_TTL_SECONDS below.

@@ -28,12 +28,17 @@ import { researchRouter } from "./routes/research.routes.js";
 import { searchRouter } from "./routes/search.routes.js";
 import { pulseRouter } from "./routes/pulse.routes.js";
 import { wsbRouter } from "./routes/wsb.routes.js";
+import { arenaRouter } from "./routes/arena.routes.js";
+import { calendarRouter } from "./routes/calendar.routes.js";
+import { discussionRouter } from "./routes/discussion.routes.js";
 import { dashboardRouter } from "./routes/dashboard.routes.js";
 import { marketDataRouter } from "./routes/marketData.routes.js";
 import { productRouter } from "./routes/product.routes.js";
 import { personalRouter } from "./routes/personal.routes.js";
 import { internalRedditRouter } from "./routes/internalReddit.routes.js";
 import { internalRedditScannerRouter } from "./routes/internalRedditScannerRoutes.js";
+import { attachDiscussionSocket } from "./realtime/discussionSocket.js";
+import { discussionSource } from "./realtime/discussionSource.js";
 import { notFound } from "./middleware/notFound.js";
 import { errorHandler } from "./middleware/errorHandler.js";
 
@@ -98,6 +103,15 @@ app.use("/api", pulseRouter);
 // Public WSB workspace: portfolio snapshots + banbets. Reads the database only;
 // /wsb/banbets/me applies requireAuth inside the router.
 app.use("/api", wsbRouter);
+// Public Arena rankings (read-only, no auth). /arena/me applies requireAuth
+// inside the router.
+app.use("/api", arenaRouter);
+// Public earnings calendar (read-only, no auth). /calendar/me/earnings and the
+// preference endpoints apply requireAuth inside the router.
+app.use("/api", calendarRouter);
+// Public realtime Reddit discussion feed (REST snapshot + SSE fallback). The
+// WebSocket transport is attached to the HTTP server below.
+app.use("/api", discussionRouter);
 app.use("/api", dashboardRouter);
 // Public market data (equities / options; license-gated, no auth). Extended
 // hours are served only when ENABLE_EXTENDED_HOURS is on — off by default,
@@ -143,8 +157,16 @@ const server = app.listen(env.PORT, () => {
   });
 });
 
+// Realtime Discussion feed shares this HTTP server rather than opening a second
+// port: one origin, one TLS certificate, and the existing CORS/proxy setup
+// applies unchanged.
+const discussionWss = attachDiscussionSocket(server);
+
 // On SIGTERM/SIGINT (a Render redeploy, a local Ctrl-C): stop accepting new
 // connections, let in-flight requests finish, then release the Prisma pool.
 registerPrismaShutdown("api", async () => {
+  discussionSource.stop();
+  for (const client of discussionWss.clients) client.close(1001, "Server shutting down");
+  discussionWss.close();
   await new Promise<void>((resolve) => server.close(() => resolve()));
 });

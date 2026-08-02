@@ -6,14 +6,31 @@ import { metricsRepository } from "../repositories/metrics.repository.js";
 import { tickersRepository } from "../repositories/tickers.repository.js";
 import { extractBets } from "../services/extraction/betExtractor.service.js";
 import { classifyStance } from "../services/extraction/stanceClassifier.service.js";
+import {
+  isPulseTimeframe,
+  PULSE_TIMEFRAME_MS,
+} from "../services/social/socialData.types.js";
+import { parseSubredditFilter } from "../services/social/subreddits.js";
 
 export const betsRouter = Router();
 
-/** GET /api/bets — filtered feed of structured bets. */
+/**
+ * GET /api/bets — filtered feed of structured bets.
+ *
+ * `ticker`, `timeframe` and `subreddits` are what the ticker page sends. All
+ * three narrow the PRISMA query, never a post-hoc filter in the client: a
+ * symbol's page must not receive other symbols' positions and then hide them.
+ *
+ * Unsupported timeframes and unknown communities are ignored rather than
+ * rejected, so a stale link widens the feed instead of erroring.
+ */
 betsRouter.get(
   "/bets",
   asyncHandler(async (req, res) => {
     const q = req.query;
+    const timeframe = str(q.timeframe);
+    const subreddits = parseSubredditFilter(str(q.subreddits));
+
     const filters: BetFilters = {
       ticker: str(q.ticker),
       optionType: str(q.option_type),
@@ -21,6 +38,10 @@ betsRouter.get(
       status: str(q.status),
       positionIntent: str(q.position_intent),
       minDeclaredCapital: num(q.min_declared_capital),
+      ...(isPulseTimeframe(timeframe)
+        ? { since: new Date(Date.now() - PULSE_TIMEFRAME_MS[timeframe]) }
+        : {}),
+      ...(subreddits ? { subreddits } : {}),
       limit: num(q.limit) ?? 100,
     };
     return ok(res, await betsRepository.list(filters));

@@ -27,6 +27,10 @@ export interface BetFilters {
   status?: string;
   positionIntent?: string;
   minDeclaredCapital?: number;
+  /** Only bets extracted at or after this instant. */
+  since?: Date;
+  /** Only bets whose source post came from one of these communities. */
+  subreddits?: string[];
   limit?: number;
 }
 
@@ -51,6 +55,8 @@ function hasFilters(f: BetFilters): boolean {
       f.verificationLevel ||
       f.status ||
       f.positionIntent ||
+      f.since ||
+      f.subreddits?.length ||
       typeof f.minDeclaredCapital === "number",
   );
 }
@@ -174,6 +180,12 @@ export const betsRepository = {
       ...(filters.positionIntent ? { positionIntent: filters.positionIntent } : {}),
       ...(typeof filters.minDeclaredCapital === "number"
         ? { declaredCapital: { gte: filters.minDeclaredCapital } }
+        : {}),
+      ...(filters.since ? { createdAt: { gte: filters.since } } : {}),
+      // Community filtering travels through the source post — a bet has no
+      // subreddit of its own, it inherits the one it was extracted from.
+      ...(filters.subreddits?.length
+        ? { redditPosts: { subreddit: { in: filters.subreddits } } }
         : {}),
     };
 

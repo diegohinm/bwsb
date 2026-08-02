@@ -14,6 +14,9 @@ import { refreshMarketMovers } from "./jobs/refreshMarketMovers.job.js";
 import { refreshSocialPulse } from "./jobs/refreshSocialPulse.job.js";
 import { refreshTickerStrip } from "./jobs/refreshTickerStrip.job.js";
 import { refreshTickerSocialMetrics } from "./jobs/refreshTickerSocialMetrics.job.js";
+import { refreshArenaTickerPerformance } from "./jobs/refreshArenaTickerPerformance.job.js";
+import { recalculateArenaUserPerformance } from "./jobs/recalculateArenaUserPerformance.job.js";
+import { refreshEarningsCalendar } from "./jobs/refreshEarningsCalendar.job.js";
 import { refreshWsbPortfolio } from "./jobs/refreshWsbPortfolio.job.js";
 import { refreshWsbBanbets } from "./jobs/refreshWsbBanbets.job.js";
 import { runRedditIngestion } from "./workers/redditWorker.js";
@@ -134,6 +137,31 @@ function start(): void {
       intervalSeconds: env.TICKER_STRIP_REFRESH_SECONDS,
       run: refreshTickerSocialMetrics,
       initialDelayMs: 75_000,
+    }),
+    // Arena: both jobs derive from stored content and stored delayed quotes, so
+    // the public page never costs an upstream request.
+    startJobLoop({
+      name: "refreshArenaTickerPerformance",
+      intervalSeconds: env.ARENA_REFRESH_SECONDS,
+      run: refreshArenaTickerPerformance,
+      initialDelayMs: 100_000,
+    }),
+    startJobLoop({
+      name: "recalculateArenaUserPerformance",
+      intervalSeconds: env.ARENA_REFRESH_SECONDS,
+      run: recalculateArenaUserPerformance,
+      initialDelayMs: 130_000,
+    }),
+    // Earnings calendar: the ONE job here that calls an external provider on a
+    // slow cadence. Six hours by default — report dates move on the scale of
+    // days, so polling faster would spend provider budget for nothing.
+    startJobLoop({
+      name: "refreshEarningsCalendar",
+      intervalSeconds: env.EARNINGS_REFRESH_SECONDS,
+      run: refreshEarningsCalendar,
+      // Last in the cold-start order: it picks its symbols from the social
+      // aggregates the jobs above have just written.
+      initialDelayMs: 150_000,
     }),
     // The two WSB jobs derive from stored content and stored quotes — no
     // provider call, so their interval is a CPU/DB choice, not a rate-limit one.

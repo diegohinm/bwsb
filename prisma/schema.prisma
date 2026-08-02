@@ -80,6 +80,8 @@ model AppUsers {
   redditAccounts                  RedditAccounts[]
   redditVerificationRequests      RedditVerificationRequests[]
   userNotifications               UserNotifications[]
+  arenaUserPerformanceSnapshots   ArenaUserPerformanceSnapshots[]
+  userCalendarPreferences         UserCalendarPreferences?
   userSessions                    UserSessions[]
   virtualAccounts                 VirtualAccounts?
   virtualPositions                VirtualPositions[]
@@ -1610,6 +1612,94 @@ model RedditIngestionCursor {
   @@map("reddit_ingestion_cursors")
 }
 
+/// ARENA — the public ticker ranking, one row per symbol per scope per period.
+///
+/// Written by `refreshArenaTickerPerformance.job.ts`, read by the public Arena
+/// endpoints. Precomputed because the page joins social mentions, sentiment and
+/// two market prices per symbol: doing that per request would be a scan per
+/// visitor, and the numbers must be identical for everyone anyway.
+///
+/// `scope` separates "r/wallstreetbets only" from "all tracked communities", so
+/// the two tables on the page can never contaminate each other.
+///
+/// Prices are the DELAYED public ones. `start_price` / `latest_price` are null
+/// when no eligible snapshot exists — the UI shows "—" rather than a fabricated
+/// return.
+model ArenaTickerPerformanceSnapshots {
+  id              String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  /// `wallstreetbets` | `all`.
+  scope           String
+  /// `daily` | `monthly`.
+  period          String
+  periodStart     DateTime @map("period_start") @db.Timestamptz(6)
+  periodEnd       DateTime @map("period_end") @db.Timestamptz(6)
+  symbol          String
+  rank            Int
+  mentions        Int
+  mentionSharePct Decimal? @map("mention_share_pct") @db.Decimal(5, 2)
+  /// How many communities mentioned it. Only meaningful for the `all` scope.
+  subredditCount  Int?     @map("subreddit_count")
+  bullishPct      Decimal? @map("bullish_pct") @db.Decimal(5, 2)
+  neutralPct      Decimal? @map("neutral_pct") @db.Decimal(5, 2)
+  bearishPct      Decimal? @map("bearish_pct") @db.Decimal(5, 2)
+  classifiedCount Int?     @map("classified_count")
+  startPrice      Decimal? @map("start_price") @db.Decimal
+  latestPrice     Decimal? @map("latest_price") @db.Decimal
+  performancePct  Decimal? @map("performance_pct") @db.Decimal
+  /// Mention buckets for the row's sparkline: [{ timestamp, mentions }].
+  trend           Json?
+  providerSocial  String?  @map("provider_social")
+  providerMarket  String?  @map("provider_market")
+  displayMode     String   @default("delayed") @map("display_mode")
+  delayMinutes    Int      @default(15) @map("delay_minutes")
+  isMock          Boolean  @default(false) @map("is_mock")
+  snapshotAt      DateTime @map("snapshot_at") @db.Timestamptz(6)
+  createdAt       DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  @@index([scope, period, snapshotAt(sort: Desc)], map: "arena_ticker_perf_scope_idx")
+  @@index([symbol, periodStart(sort: Desc)], map: "arena_ticker_perf_symbol_idx")
+  @@map("arena_ticker_performance_snapshots")
+}
+
+/// ARENA — the public user leaderboard, one row per user per period per run.
+///
+/// `public_after` is the delay gate: the worker stamps it at calculation time
+/// plus the public delay, and every public read filters `public_after <= now()`.
+/// That is what keeps a fresh internal equity calculation from leaking a
+/// real-time portfolio value through the leaderboard.
+///
+/// Ranking is by RETURN, not by balance — starting cash differs between users,
+/// so absolute equity would rank the richest rather than the best.
+model ArenaUserPerformanceSnapshots {
+  id                   String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId               String   @map("user_id") @db.Uuid
+  /// `daily` | `monthly`.
+  period               String
+  periodStart          DateTime @map("period_start") @db.Timestamptz(6)
+  periodEnd            DateTime @map("period_end") @db.Timestamptz(6)
+  rank                 Int
+  periodStartingEquity Decimal  @map("period_starting_equity") @db.Decimal
+  portfolioValue       Decimal  @map("portfolio_value") @db.Decimal
+  periodPnl            Decimal  @map("period_pnl") @db.Decimal
+  returnPct            Decimal  @map("return_pct") @db.Decimal
+  winRatePct           Decimal? @map("win_rate_pct") @db.Decimal(5, 2)
+  tradeCount           Int      @default(0) @map("trade_count")
+  bestTicker           String?  @map("best_ticker")
+  bestTradeReturnPct   Decimal? @map("best_trade_return_pct") @db.Decimal
+  maximumDrawdownPct   Decimal? @map("maximum_drawdown_pct") @db.Decimal(5, 2)
+  calculatedAt         DateTime @map("calculated_at") @db.Timestamptz(6)
+  /// Not publishable before this instant. Enforced by every public read.
+  publicAfter          DateTime @map("public_after") @db.Timestamptz(6)
+  isMock               Boolean  @default(false) @map("is_mock")
+  createdAt            DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  appUsers AppUsers @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([period, publicAfter(sort: Desc), rank], map: "arena_user_perf_public_idx")
+  @@index([userId, periodStart(sort: Desc)], map: "arena_user_perf_user_idx")
+  @@map("arena_user_performance_snapshots")
+}
+
 /// Per-ticker social activity, pre-bucketed by the worker.
 ///
 /// Serves BOTH the Feel % column (sum the buckets inside the selected window)
@@ -1797,4 +1887,69 @@ model WsbBanbets {
   @@index([ticker, createdAt(sort: Desc)], map: "wsb_banbets_ticker_created_idx")
   @@index([appUserId, createdAt(sort: Desc)], map: "wsb_banbets_app_user_idx")
   @@map("wsb_banbets")
+}
+
+/// EARNINGS CALENDAR — one scheduled (or already reported) earnings event.
+///
+/// Written ONLY by refreshEarningsCalendar in the worker; the API reads it and
+/// never reaches the provider. `external_id` keys the upsert so re-fetching the
+/// same quarter updates the row rather than duplicating it.
+///
+/// The two honesty columns are `status` and `timing`. `status` separates a date
+/// the company (or the provider) actually confirmed from one that was inferred,
+/// and `timing` never invents a clock time: `report_time` stays NULL unless the
+/// provider gave one, and the UI prints "After Market Close" alone.
+model EarningsEvents {
+  id              String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  symbol          String
+  companyName     String?   @map("company_name")
+  /// The market-local calendar date of the report (America/New_York).
+  reportDate      DateTime  @map("report_date") @db.Date
+  /// Exact instant, when — and only when — the provider supplied one.
+  reportTime      DateTime? @map("report_time") @db.Timestamptz(6)
+  /// `before_market` | `after_market` | `during_market` | `unknown`.
+  timing          String    @default("unknown")
+  /// `confirmed` | `estimated`. Never defaulted to confirmed.
+  status          String    @default("estimated")
+  fiscalQuarter   String?   @map("fiscal_quarter")
+  fiscalYear      Int?      @map("fiscal_year")
+  epsEstimate     Decimal?  @map("eps_estimate") @db.Decimal
+  epsActual       Decimal?  @map("eps_actual") @db.Decimal
+  revenueEstimate Decimal?  @map("revenue_estimate") @db.Decimal
+  revenueActual   Decimal?  @map("revenue_actual") @db.Decimal
+  provider        String
+  source          String?
+  externalId      String?   @unique @map("external_id")
+  isMock          Boolean   @default(false) @map("is_mock")
+  fetchedAt       DateTime  @default(now()) @map("fetched_at") @db.Timestamptz(6)
+  updatedAt       DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  createdAt       DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  @@index([reportDate], map: "earnings_events_date_idx")
+  @@index([symbol, reportDate], map: "earnings_events_symbol_date_idx")
+  @@index([status, reportDate], map: "earnings_events_status_date_idx")
+  @@map("earnings_events")
+}
+
+/// A signed-in user's Calendar personalization. One row per user.
+///
+/// Deliberately small: which symbols to draw, which sources to pull them from,
+/// and the two display preferences. Nothing here is public — the Calendar's
+/// public surface is built from Reddit mention aggregates, never from anyone's
+/// saved tickers or watchlist.
+model UserCalendarPreferences {
+  id                      String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId                  String   @unique @map("user_id") @db.Uuid
+  selectedTickers         String[] @default([]) @map("selected_tickers")
+  includeWatchlist        Boolean  @default(true) @map("include_watchlist")
+  includeVirtualPositions Boolean  @default(true) @map("include_virtual_positions")
+  includeTrendingTickers  Boolean  @default(false) @map("include_trending_tickers")
+  /// `month` | `week` | `list`.
+  defaultView             String   @default("month") @map("default_view")
+  timezone                String   @default("America/New_York")
+  createdAt               DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt               DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  appUsers                AppUsers @relation(fields: [userId], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@map("user_calendar_preferences")
 }

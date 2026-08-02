@@ -35,6 +35,9 @@
     "start:worker:reddit": "node dist/workers/redditWorker.js",
     "strip:refresh": "tsx src/jobs/refreshTickerStrip.job.ts",
     "ticker:metrics:refresh": "tsx src/jobs/refreshTickerSocialMetrics.job.ts",
+    "arena:tickers:refresh": "tsx src/jobs/refreshArenaTickerPerformance.job.ts",
+    "arena:users:refresh": "tsx src/jobs/recalculateArenaUserPerformance.job.ts",
+    "calendar:earnings:refresh": "tsx src/jobs/refreshEarningsCalendar.job.ts",
     "wsb:portfolio:refresh": "tsx src/jobs/refreshWsbPortfolio.job.ts",
     "wsb:banbets:refresh": "tsx src/jobs/refreshWsbBanbets.job.ts",
     "ingest:once": "npm run market:refresh && npm run movers:refresh && npm run social:refresh && npm run strip:refresh && npm run ticker:metrics:refresh && npm run wsb:portfolio:refresh && npm run wsb:banbets:refresh",
@@ -57,6 +60,7 @@
     "morgan": "^1.10.0",
     "nodemailer": "^9.0.3",
     "pg": "^8.22.0",
+    "ws": "^8.21.1",
     "zod": "^3.23.8"
   },
   "devDependencies": {
@@ -70,6 +74,7 @@
     "@types/node": "^22.7.4",
     "@types/nodemailer": "^8.0.1",
     "@types/pg": "^8.20.0",
+    "@types/ws": "^8.18.1",
     "prisma": "6.19.3",
     "tsx": "^4.19.1",
     "typescript": "^5.6.2"
