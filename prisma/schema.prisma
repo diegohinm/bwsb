@@ -1610,6 +1610,39 @@ model RedditIngestionCursor {
   @@map("reddit_ingestion_cursors")
 }
 
+/// Per-ticker social activity, pre-bucketed by the worker.
+///
+/// Serves BOTH the Feel % column (sum the buckets inside the selected window)
+/// and the mentions-trend chart (plot the buckets). One table, because they are
+/// the same measurement at two resolutions — and because the alternative is
+/// scanning `social_posts`/`social_comments` on every page request.
+///
+/// The worker writes four bucket sizes so each UI window reads a sensible
+/// resolution: 5m→1H, 30m→6H, 1h→24H, 6h→7D.
+///
+/// `mentions` counts every item referencing the ticker. The three stance counts
+/// only include CLASSIFIED items, so `bullish + neutral + bearish` can be less
+/// than `mentions` — an unclassified item is not silently filed as neutral.
+model TickerSocialMetricSnapshots {
+  id           String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  ticker       String
+  bucketStart  DateTime @map("bucket_start") @db.Timestamptz(6)
+  /// `5m` | `30m` | `1h` | `6h`.
+  bucketSize   String   @map("bucket_size")
+  mentions     Int      @default(0)
+  bullishCount Int      @default(0) @map("bullish_count")
+  neutralCount Int      @default(0) @map("neutral_count")
+  bearishCount Int      @default(0) @map("bearish_count")
+  provider     String?
+  source       String?
+  isMock       Boolean  @default(false) @map("is_mock")
+  createdAt    DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  @@unique([ticker, bucketSize, bucketStart], map: "ticker_social_metrics_unique")
+  @@index([bucketSize, bucketStart(sort: Desc)], map: "ticker_social_metrics_bucket_idx")
+  @@map("ticker_social_metric_snapshots")
+}
+
 /// WSB PORTFOLIO — one row per timeframe per worker run.
 ///
 /// Written by `refreshWsbPortfolio.job.ts` from positions the worker extracted

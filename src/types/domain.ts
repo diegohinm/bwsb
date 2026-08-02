@@ -40,6 +40,12 @@ export interface Ticker {
   is_active: boolean | null;
   is_common_word: boolean | null;
   created_at?: string | null;
+  /**
+   * Reddit mentions in the newest trending snapshot. Present only on the
+   * popularity-sorted listing, and NULL — never 0 — when the worker has no
+   * measurement for the symbol: "we didn't see it" is not "nobody mentioned it".
+   */
+  mention_count?: number | null;
 }
 
 export interface RedditPost {

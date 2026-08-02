@@ -13,6 +13,7 @@ import { refreshMarketQuotes } from "./jobs/refreshMarketQuotes.job.js";
 import { refreshMarketMovers } from "./jobs/refreshMarketMovers.job.js";
 import { refreshSocialPulse } from "./jobs/refreshSocialPulse.job.js";
 import { refreshTickerStrip } from "./jobs/refreshTickerStrip.job.js";
+import { refreshTickerSocialMetrics } from "./jobs/refreshTickerSocialMetrics.job.js";
 import { refreshWsbPortfolio } from "./jobs/refreshWsbPortfolio.job.js";
 import { refreshWsbBanbets } from "./jobs/refreshWsbBanbets.job.js";
 import { runRedditIngestion } from "./workers/redditWorker.js";
@@ -124,6 +125,15 @@ function start(): void {
       run: refreshTickerStrip,
       // Runs on DB data only — give the first social/market runs a head start.
       initialDelayMs: 60_000,
+    }),
+    // Per-ticker social buckets: pure derivation over stored content, so the
+    // Popular Tickers sentiment column and the trend chart never touch a
+    // provider. Runs after the social ingestion that feeds it.
+    startJobLoop({
+      name: "refreshTickerSocialMetrics",
+      intervalSeconds: env.TICKER_STRIP_REFRESH_SECONDS,
+      run: refreshTickerSocialMetrics,
+      initialDelayMs: 75_000,
     }),
     // The two WSB jobs derive from stored content and stored quotes — no
     // provider call, so their interval is a CPU/DB choice, not a rate-limit one.

@@ -19,12 +19,76 @@ const TICKER_COLUMNS = {
  * the ticker/search routes serialize them straight onto the wire.
  */
 export const tickersRepository = {
-  async listAll(): Promise<Ticker[]> {
+  async listAll(q?: string): Promise<Ticker[]> {
     const rows = await prisma.tickers.findMany({
       select: TICKER_COLUMNS,
+      ...(q
+        ? {
+            where: {
+              OR: [
+                { ticker: { contains: q, mode: "insensitive" as const } },
+                { companyName: { contains: q, mode: "insensitive" as const } },
+              ],
+            },
+          }
+        : {}),
       orderBy: { ticker: "asc" },
     });
     return toDbRows<Ticker>("Tickers", rows);
+  },
+
+  /**
+   * The catalog ordered by how much Reddit is actually talking about each
+   * symbol, using the newest `trending_ticker_snapshots` batch the worker wrote.
+   *
+   * Two rules keep this honest:
+   *   - a symbol with no measurement gets `mention_count: null`, not 0, and
+   *     sorts after every measured one — the list never implies a rank we did
+   *     not measure;
+   *   - when no snapshot exists at all, this degrades to the alphabetical
+   *     catalog with `mention_count` null everywhere, which is exactly the old
+   *     behaviour plus an empty column.
+   *
+   * Reads stored rows only; it cannot trigger a provider call.
+   */
+  async listPopular(
+    q?: string,
+    timeframe = "24h",
+  ): Promise<{ rows: Ticker[]; snapshotAt: string | null }> {
+    const [catalog, newest] = await Promise.all([
+      this.listAll(q),
+      prisma.trendingTickerSnapshots.aggregate({
+        where: { timeframe },
+        _max: { snapshotAt: true },
+      }),
+    ]);
+
+    const snapshotAt = newest._max.snapshotAt;
+    if (!snapshotAt) {
+      return {
+        rows: catalog.map((t) => ({ ...t, mention_count: null })),
+        snapshotAt: null,
+      };
+    }
+
+    const trending = await prisma.trendingTickerSnapshots.findMany({
+      where: { timeframe, snapshotAt },
+      select: { symbol: true, mentionCount: true },
+    });
+    const mentions = new Map(trending.map((r) => [r.symbol.toUpperCase(), r.mentionCount ?? 0]));
+
+    const rows = catalog
+      .map((t) => ({ ...t, mention_count: mentions.get(t.ticker.toUpperCase()) ?? null }))
+      .sort((a, b) => {
+        const am = a.mention_count;
+        const bm = b.mention_count;
+        if (am === null && bm === null) return a.ticker.localeCompare(b.ticker);
+        if (am === null) return 1;
+        if (bm === null) return -1;
+        return bm - am || a.ticker.localeCompare(b.ticker);
+      });
+
+    return { rows, snapshotAt: snapshotAt.toISOString() };
   },
 
   async findByTicker(ticker: string): Promise<Ticker | null> {

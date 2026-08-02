@@ -34,9 +34,10 @@
     "dev:worker:reddit": "tsx watch src/workers/redditWorker.ts",
     "start:worker:reddit": "node dist/workers/redditWorker.js",
     "strip:refresh": "tsx src/jobs/refreshTickerStrip.job.ts",
+    "ticker:metrics:refresh": "tsx src/jobs/refreshTickerSocialMetrics.job.ts",
     "wsb:portfolio:refresh": "tsx src/jobs/refreshWsbPortfolio.job.ts",
     "wsb:banbets:refresh": "tsx src/jobs/refreshWsbBanbets.job.ts",
-    "ingest:once": "npm run market:refresh && npm run movers:refresh && npm run social:refresh && npm run strip:refresh && npm run wsb:portfolio:refresh && npm run wsb:banbets:refresh",
+    "ingest:once": "npm run market:refresh && npm run movers:refresh && npm run social:refresh && npm run strip:refresh && npm run ticker:metrics:refresh && npm run wsb:portfolio:refresh && npm run wsb:banbets:refresh",
     "jobs:all": "npm run portfolio:recalculate && npm run leaderboard:recalculate && npm run tokens:expire && npm run ingest:once"
   },
   "prisma": {

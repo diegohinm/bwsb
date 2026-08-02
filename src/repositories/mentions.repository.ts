@@ -72,10 +72,23 @@ export const mentionsRepository = {
     return toDbRows("TickerStanceEvents", rows);
   },
 
-  async stanceSplit(ticker: string): Promise<{ stance: string; n: number }[]> {
+  /**
+   * Stance counts for a ticker, optionally limited to events since `sinceIso`.
+   *
+   * The window is what makes the workspace's 1H/6H/24H/7D selector mean
+   * something here: without it the split is all-time and would not move when the
+   * user narrows the period. Served by the `stance_events_created_idx` index.
+   */
+  async stanceSplit(
+    ticker: string,
+    sinceIso?: string,
+  ): Promise<{ stance: string; n: number }[]> {
     const groups = await prisma.tickerStanceEvents.groupBy({
       by: ["stance"],
-      where: { ticker },
+      where: {
+        ticker,
+        ...(sinceIso ? { createdAt: { gte: new Date(sinceIso) } } : {}),
+      },
       _count: { _all: true },
     });
     return groups.map((g) => ({ stance: g.stance, n: g._count._all }));
