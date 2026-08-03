@@ -8,6 +8,7 @@ import { disconnectPrisma } from "../lib/prisma.js";
 import { getRedditDataProvider } from "../providers/reddit/RedditProviderFactory.js";
 import { ingestRedditPosts } from "../services/redditIngestionService.js";
 import { buildArcticShiftWorker } from "./reddit/startArcticShiftWorker.js";
+import { isEventPublishingConfigured } from "../services/realtime/internalEventPublisher.js";
 
 /**
  * WORKER JOB — Reddit ingestion through the configurable provider layer.
@@ -90,6 +91,13 @@ function redditIngestCommentsEnabled(): boolean {
  * runs the legacy multi-subreddit ingestion used by `npm run reddit:ingest`.
  */
 async function runStandaloneArcticShiftWorker(): Promise<never> {
+  // A single unambiguous first line: on a hosting platform the log IS the only
+  // window into a service with no URL.
+  console.log(
+    `[RedditWorker] Started — provider=${describeRedditDataConfig(getRedditDataConfig())}, ` +
+      `realtime=${isEventPublishingConfigured() ? "on" : "off"}`,
+  );
+
   const worker = buildArcticShiftWorker();
   const runOnce = process.argv.includes("--once");
 
@@ -120,6 +128,7 @@ async function runStandaloneArcticShiftWorker(): Promise<never> {
   }
 
   console.log("[ArcticShiftWorker] Stopped cleanly.");
+  console.log("[RedditWorker] Stopped.");
   process.exit(0);
 }
 

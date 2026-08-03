@@ -149,6 +149,8 @@ export interface ArenaUserRow {
   userId: string;
   displayName: string;
   avatarUrl: string | null;
+  /** Public Reddit identity, when the user has a VERIFIED one. */
+  reddit: { username: string; verificationStatus: string; verifiedAt: string | null } | null;
   returnPct: number;
   portfolioValue: number;
   periodPnL: number;
@@ -232,7 +234,21 @@ export async function readLeaderboard(
         isMock: true,
         // Only public profile columns. Email / googleSub / authProvider are
         // deliberately absent so they cannot leak downstream.
-        appUsers: { select: { displayName: true, avatarUrl: true } },
+        // Reddit verification is public by nature — it is a claim about a
+        // public Reddit identity — so the badge can be truthful here instead of
+        // rendering "unverified" for everyone by default.
+        appUsers: {
+          select: {
+            displayName: true,
+            avatarUrl: true,
+            redditAccounts: {
+              where: { verificationStatus: "verified" },
+              select: { redditUsername: true, verificationStatus: true, verifiedAt: true },
+              orderBy: { updatedAt: "desc" },
+              take: 1,
+            },
+          },
+        },
       },
     }),
     prisma.arenaUserPerformanceSnapshots.count({ where: batch }),
@@ -245,6 +261,13 @@ export async function readLeaderboard(
       // No display name yet → a stable anonymous label, never the email local part.
       displayName: r.appUsers.displayName?.trim() || `Trader #${r.rank}`,
       avatarUrl: r.appUsers.avatarUrl ?? null,
+      reddit: r.appUsers.redditAccounts[0]
+        ? {
+            username: r.appUsers.redditAccounts[0].redditUsername,
+            verificationStatus: r.appUsers.redditAccounts[0].verificationStatus,
+            verifiedAt: r.appUsers.redditAccounts[0].verifiedAt?.toISOString() ?? null,
+          }
+        : null,
       returnPct: num(r.returnPct) ?? 0,
       portfolioValue: num(r.portfolioValue) ?? 0,
       periodPnL: num(r.periodPnl) ?? 0,

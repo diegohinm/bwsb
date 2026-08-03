@@ -3,6 +3,7 @@ import { Prisma } from "@prisma/client";
 import { prisma, disconnectPrisma } from "../lib/prisma.js";
 import { virtualRepository } from "../repositories/virtual.repository.js";
 import { getStoredQuotes } from "../services/market-data/marketRead.service.js";
+import { recordEquitySnapshot } from "../services/portfolio/portfolioSummary.service.js";
 
 /**
  * Recompute virtual-portfolio valuations from the latest ingested quotes.
@@ -19,10 +20,10 @@ const n = (v: unknown): number => {
 };
 
 async function main(): Promise<void> {
-  let accounts: Array<{ id: string; cashBalance: Prisma.Decimal }> = [];
+  let accounts: Array<{ id: string; userId: string; cashBalance: Prisma.Decimal }> = [];
   try {
     accounts = await prisma.virtualAccounts.findMany({
-      select: { id: true, cashBalance: true },
+      select: { id: true, userId: true, cashBalance: true },
     });
   } catch (err) {
     console.error("[portfolio:recalculate] cannot read accounts:", err instanceof Error ? err.message : err);
@@ -32,7 +33,13 @@ async function main(): Promise<void> {
   for (const account of accounts) {
     try {
       const positions = await virtualRepository.listPositions(account.id);
-      if (positions.length === 0) continue;
+      // An account with no positions still gets an equity reading — its cash is
+      // its equity, and skipping it would leave a hole in the history that the
+      // day/month comparisons read.
+      if (positions.length === 0) {
+        await recordEquitySnapshot(account.userId);
+        continue;
+      }
 
       // ticker is nullable on the column; a position without one simply has no
       // quote to look up and falls back to its average cost.
@@ -64,6 +71,11 @@ async function main(): Promise<void> {
         n(account.cashBalance),
         Math.round(equityValue * 100) / 100,
       );
+      // Append today's reading so "day P/L" has a baseline tomorrow. Written
+      // HERE, in the worker — a read endpoint that appended would move the
+      // baseline every time the page was opened.
+      await recordEquitySnapshot(account.userId);
+
       const mock = quotes[0]?.isMock ? " (mock quotes)" : "";
       console.log(
         `[portfolio:recalculate] account ${account.id}: ${positions.length} positions, equity=${Math.round(equityValue)}${mock}`,

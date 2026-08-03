@@ -23,6 +23,11 @@ export interface AuthUser {
   reddit: {
     username: string;
     verificationStatus: string;
+    /**
+     * When verification actually completed. THE field that decides the badge —
+     * a stored username with no verifiedAt is a claim, not a verification.
+     */
+    verifiedAt: string | null;
   } | null;
 }
 
@@ -49,12 +54,12 @@ export async function getAuthUserById(userId: string): Promise<AuthUser | null> 
   const reddit =
     (await prisma.redditAccounts.findFirst({
       where: { userId, verificationStatus: "verified" },
-      select: { redditUsername: true, verificationStatus: true },
+      select: { redditUsername: true, verificationStatus: true, verifiedAt: true },
       orderBy: { updatedAt: "desc" },
     })) ??
     (await prisma.redditAccounts.findFirst({
       where: { userId },
-      select: { redditUsername: true, verificationStatus: true },
+      select: { redditUsername: true, verificationStatus: true, verifiedAt: true },
       orderBy: { updatedAt: "desc" },
     }));
 
@@ -73,6 +78,7 @@ export async function getAuthUserById(userId: string): Promise<AuthUser | null> 
       ? {
           username: reddit.redditUsername,
           verificationStatus: reddit.verificationStatus,
+          verifiedAt: reddit.verifiedAt ? reddit.verifiedAt.toISOString() : null,
         }
       : null,
   };

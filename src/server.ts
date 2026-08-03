@@ -36,8 +36,10 @@ import { dashboardRouter } from "./routes/dashboard.routes.js";
 import { marketDataRouter } from "./routes/marketData.routes.js";
 import { productRouter } from "./routes/product.routes.js";
 import { personalRouter } from "./routes/personal.routes.js";
+import { meAccountRouter } from "./routes/meAccount.routes.js";
 import { internalRedditRouter } from "./routes/internalReddit.routes.js";
 import { internalRedditScannerRouter } from "./routes/internalRedditScannerRoutes.js";
+import { internalRedditEventsRouter } from "./routes/internalRedditEvents.routes.js";
 import { attachDiscussionSocket } from "./realtime/discussionSocket.js";
 import { discussionSource } from "./realtime/discussionSource.js";
 import { notFound } from "./middleware/notFound.js";
@@ -127,18 +129,30 @@ app.use("/admin", adminRedditVerificationRouter);
 app.use("/api", internalRedditRouter);
 // Internal Reddit scanner test harness (dev-open, admin-only in production).
 app.use("/api/internal/reddit/scanner", internalRedditScannerRouter);
+// Service-to-service realtime bridge from the ingestion worker. Guarded by a
+// shared secret inside the router; deliberately NOT in the CORS allowlist —
+// no browser should ever reach it.
+app.use("/api", internalRedditEventsRouter);
 // Protected personal features (requireAuth applied inside the router). Mounted
 // after the public routers so public routes are handled without auth.
 app.use("/api", personalRouter);
+// Authenticated self-service: the caller's own portfolio summary and account
+// updates. requireAuth is applied inside the router, for every route.
+app.use("/api", meAccountRouter);
 
 // 404 + error handling (must come last).
 app.use(notFound);
 app.use(errorHandler);
 
-const server = app.listen(env.PORT, () => {
+// 0.0.0.0, not the default loopback: a container's health check and its load
+// balancer reach the process from outside its own network namespace, so binding
+// to 127.0.0.1 makes a perfectly healthy service look dead.
+const server = app.listen(env.PORT, "0.0.0.0", () => {
   console.log(
-    `${BRANDING.productName} API (${BRANDING.backendName}) running on ${env.BACKEND_URL} — role=${SERVICE_ROLE}`,
+    `[API] Started — ${BRANDING.productName} (${BRANDING.backendName}) on port ${env.PORT}, ` +
+      `host 0.0.0.0, role=${SERVICE_ROLE}`,
   );
+  console.log(`[API] CORS origin: ${env.FRONTEND_ORIGIN}`);
   console.log(
     `Reddit OAuth: ${
       isRedditOAuthConfigured ? "configured" : "NOT configured (email auth only)"

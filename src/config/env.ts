@@ -72,10 +72,14 @@ const envSchema = z.object({
    */
   SERVICE_ROLE: z.enum(["api", "worker", "all"]).default("all"),
 
-  // Public origin of the frontend. Also the only allowed CORS origin. Accepts
-  // FRONTEND_ORIGIN (new name); the code still reads env.FRONTEND_URL too (alias
-  // added below) for backwards compatibility.
-  FRONTEND_ORIGIN: z.string().url().default("http://localhost:5173"),
+  // Public origin of the frontend, and the ONLY allowed CORS origin.
+  //
+  // Both spellings are accepted as INPUT: FRONTEND_ORIGIN is the schema name,
+  // FRONTEND_URL is what most hosting guides (and Render's own docs) call it.
+  // Reading only one while an operator sets the other is silent
+  // misconfiguration that surfaces as a CORS failure in production.
+  FRONTEND_ORIGIN: optionalNonEmpty,
+  FRONTEND_URL: optionalNonEmpty,
   BACKEND_URL: z.string().url().default("http://localhost:4000"),
 
   // App database (Prisma + raw pg pool + session/auth tables).
@@ -107,6 +111,24 @@ const envSchema = z.object({
   // which owns the port/secure pairing and strips the spaces out of a Google app
   // password. Declaring them in two places is how a configured SMTP_FROM ended
   // up being ignored, so there is exactly one parser.
+
+  // ── Service-to-service (worker → API realtime events) ──────────────────────
+  /**
+   * Shared secret the worker presents on /api/internal/reddit/events.
+   *
+   * MUST be byte-identical in both services. When it is unset the internal
+   * endpoint refuses every request — an unauthenticated broadcast channel is
+   * worse than no channel, so it fails closed rather than open.
+   */
+  WORKER_INTERNAL_SECRET: optionalNonEmpty,
+  /**
+   * WORKER ONLY: where to POST realtime events, e.g.
+   * https://yolopulse-api.onrender.com. Unset means the worker persists to the
+   * database and publishes nothing — degraded, never broken.
+   */
+  API_INTERNAL_URL: optionalNonEmpty,
+  /** Reserved for a future Pub/Sub transport. Nothing reads it yet. */
+  REDIS_URL: optionalNonEmpty,
 
   // ── Reddit OAuth 2.0 (OPTIONAL / future) ───────────────────────────────────
   // All optional. The client secret is server-side only and never sent to the
@@ -347,10 +369,15 @@ export const isGoogleOAuthConfigured: boolean = Boolean(
     data.GOOGLE_CLIENT_SECRET !== GOOGLE_SECRET_PLACEHOLDER,
 );
 
+const FRONTEND_ORIGIN =
+  data.FRONTEND_ORIGIN ?? data.FRONTEND_URL ?? "http://localhost:5173";
+
 export const env = {
   ...data,
-  // Backwards-compatible alias: existing code reads env.FRONTEND_URL.
-  FRONTEND_URL: data.FRONTEND_ORIGIN,
+  FRONTEND_ORIGIN,
+  // One resolved value under both names, so no consumer has to know which
+  // variable the operator happened to set.
+  FRONTEND_URL: FRONTEND_ORIGIN,
   // Effective Google redirect URI: explicit value wins, else derive from the
   // backend URL so a minimal id+secret config still works out of the box.
   GOOGLE_REDIRECT_URI:
