@@ -4,6 +4,7 @@ import {
   sendVerificationEmail,
   sendPasswordResetEmail,
 } from "../email/email.service.js";
+import { EmailDeliveryError } from "../email/EmailDeliveryError.js";
 import { hashPassword, verifyPassword, validatePasswordStrength } from "./password.service.js";
 import { createRandomToken, hashToken } from "./token.service.js";
 import { createSession } from "./session.service.js";
@@ -23,6 +24,40 @@ import { DEFAULT_AVATAR_URL, DEFAULT_AVATAR_TYPE } from "../../config/branding.j
 const VERIFICATION_TOKEN_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
 const RESET_TOKEN_TTL_MS = 60 * 60 * 1000; // 1 hour
 
+/**
+ * Delivery states a verification token moves through.
+ *
+ * Only SENT can complete a verification. PENDING means the email has not been
+ * accepted by the mail server yet, and FAILED means it never will be — neither
+ * is a link anybody could have received, so neither may unlock an account.
+ */
+export const TOKEN_STATUS = {
+  pending: "pending",
+  sent: "sent",
+  failed: "failed",
+} as const;
+
+/** What a token authorizes. Checked on consumption, not just on creation. */
+export const TOKEN_PURPOSE = {
+  emailRegistration: "email_registration",
+} as const;
+
+/** The one condition under which a stored verification token may be used. */
+function usableTokenWhere(token: string) {
+  return {
+    tokenHash: hashToken(token),
+    status: TOKEN_STATUS.sent,
+    purpose: TOKEN_PURPOSE.emailRegistration,
+    usedAt: null,
+    expiresAt: { gt: new Date() },
+  };
+}
+
+/** Format check, shared by every entry point that accepts an email. */
+export function isValidEmail(email: string): boolean {
+  return EMAIL_RE.test((email ?? "").trim());
+}
+
 /** Normalize an email for storage/lookup: trim + lowercase. */
 export function normalizeEmail(email: string): string {
   return email.trim().toLowerCase();
@@ -31,12 +66,47 @@ export function normalizeEmail(email: string): string {
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 /**
+ * THE ORDERING RULE, on its own so it can be tested without a database.
+ *
+ * Create the token, try to send, and only then make it usable. If the send
+ * fails the token is discarded and the error propagates — there is no path
+ * through this function that leaves a valid link nobody received, and none that
+ * reports success after a failed delivery.
+ *
+ * Deliberately not wrapped in a transaction: holding one open across an SMTP
+ * round-trip pins a pooler connection for as long as the mail server takes to
+ * answer. The status column achieves the same guarantee without that cost.
+ */
+export async function issueTokenThenSend(deps: {
+  createToken: () => Promise<{ id: string }>;
+  send: () => Promise<void>;
+  markSent: (id: string) => Promise<void>;
+  discard: (id: string) => Promise<void>;
+  /** Wrapped around a non-delivery failure so the route can map it to 502. */
+  wrapError?: (err: unknown) => Error;
+}): Promise<void> {
+  const { id } = await deps.createToken();
+
+  try {
+    await deps.send();
+  } catch (err) {
+    // Best-effort cleanup: if the delete itself fails the token still cannot be
+    // used, because it never left the `pending` state.
+    await deps.discard(id).catch(() => undefined);
+    if (err instanceof EmailDeliveryError) throw err;
+    throw deps.wrapError?.(err) ?? new EmailDeliveryError("Unable to send email", { cause: err });
+  }
+
+  await deps.markSent(id);
+}
+
+/**
  * Step 1 of signup. Create the account if new, then email a set-password link.
  * Always resolves so callers cannot probe which emails exist.
  */
 export async function requestEmailSignup(email: string): Promise<void> {
   const raw = (email ?? "").trim();
-  if (!EMAIL_RE.test(raw)) {
+  if (!isValidEmail(raw)) {
     // Invalid format is a client error we can surface without leaking anything.
     throw new Error("Please enter a valid email address");
   }
@@ -59,14 +129,51 @@ export async function requestEmailSignup(email: string): Promise<void> {
     select: { id: true },
   });
 
-  const rawToken = createRandomToken();
-  const expiresAt = new Date(Date.now() + VERIFICATION_TOKEN_TTL_MS);
-  await prisma.emailVerificationTokens.create({
-    data: { userId: user.id, tokenHash: hashToken(rawToken), expiresAt },
+  // Supersede anything still outstanding: requesting a new link should not
+  // leave three usable ones behind.
+  await prisma.emailVerificationTokens.updateMany({
+    where: {
+      userId: user.id,
+      purpose: TOKEN_PURPOSE.emailRegistration,
+      usedAt: null,
+      status: { in: [TOKEN_STATUS.pending, TOKEN_STATUS.sent] },
+    },
+    data: { status: TOKEN_STATUS.failed },
   });
 
+  // Only the HASH is stored. The raw token exists in this function and in the
+  // recipient's inbox, nowhere else — and it is never logged.
+  const rawToken = createRandomToken();
+  const expiresAt = new Date(Date.now() + VERIFICATION_TOKEN_TTL_MS);
+
   const url = `${env.FRONTEND_ORIGIN}/set-password?token=${rawToken}`;
-  await sendVerificationEmail(raw, url);
+
+  await issueTokenThenSend({
+    createToken: () =>
+      prisma.emailVerificationTokens.create({
+        data: {
+          userId: user.id,
+          tokenHash: hashToken(rawToken),
+          status: TOKEN_STATUS.pending,
+          purpose: TOKEN_PURPOSE.emailRegistration,
+          expiresAt,
+        },
+        select: { id: true },
+      }),
+    send: () => sendVerificationEmail(raw, url),
+    // Accepted by the mail server — only now does the link become usable.
+    markSent: async (id) => {
+      await prisma.emailVerificationTokens.update({
+        where: { id },
+        data: { status: TOKEN_STATUS.sent, sentAt: new Date() },
+      });
+    },
+    discard: async (id) => {
+      await prisma.emailVerificationTokens.delete({ where: { id } });
+    },
+    wrapError: (err) =>
+      new EmailDeliveryError("Unable to send verification email", { cause: err }),
+  });
 }
 
 /**
@@ -77,11 +184,7 @@ export async function verifyEmailToken(
   token: string,
 ): Promise<{ userId: string }> {
   const row = await prisma.emailVerificationTokens.findFirst({
-    where: {
-      tokenHash: hashToken(token),
-      usedAt: null,
-      expiresAt: { gt: new Date() },
-    },
+    where: usableTokenWhere(token),
     select: { userId: true },
   });
   if (!row) {
@@ -101,12 +204,11 @@ export async function setPasswordAfterVerification(
 ): Promise<{ userId: string }> {
   validatePasswordStrength(password);
 
+  // status/purpose are part of the lookup, so a token whose email never left
+  // the building simply does not match and the caller gets the same "invalid
+  // or expired" answer as any other bad link.
   const row = await prisma.emailVerificationTokens.findFirst({
-    where: {
-      tokenHash: hashToken(token),
-      usedAt: null,
-      expiresAt: { gt: new Date() },
-    },
+    where: usableTokenWhere(token),
     select: { id: true, userId: true },
   });
   if (!row) {
@@ -192,12 +294,25 @@ export async function requestPasswordReset(email: string): Promise<void> {
 
   const rawToken = createRandomToken();
   const expiresAt = new Date(Date.now() + RESET_TOKEN_TTL_MS);
-  await prisma.passwordResetTokens.create({
-    data: { userId: user.id, tokenHash: hashToken(rawToken), expiresAt },
-  });
-
   const url = `${env.FRONTEND_ORIGIN}/reset-password?token=${rawToken}`;
-  await sendPasswordResetEmail(user.email, url);
+
+  // Same rule as signup: a reset link nobody received must not stay valid.
+  // `password_reset_tokens` has no status column, so the token is deleted
+  // outright rather than parked in a failed state.
+  await issueTokenThenSend({
+    createToken: () =>
+      prisma.passwordResetTokens.create({
+        data: { userId: user.id, tokenHash: hashToken(rawToken), expiresAt },
+        select: { id: true },
+      }),
+    send: () => sendPasswordResetEmail(user.email, url),
+    markSent: async () => undefined,
+    discard: async (id) => {
+      await prisma.passwordResetTokens.delete({ where: { id } });
+    },
+    wrapError: (err) =>
+      new EmailDeliveryError("Unable to send password reset email", { cause: err }),
+  });
 }
 
 /**

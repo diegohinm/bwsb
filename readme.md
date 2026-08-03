@@ -48,6 +48,73 @@ reads the API. Provider API keys exist only in the worker's environment, and
 the boundary is enforced in code, not just documented. If every provider is
 unavailable the app continues serving the most recent stored data.
 
+## Email (verification links + password resets)
+
+Signup is link-first: the user submits an address, receives a one-time link, and
+sets their password on that page. That only works if the backend can actually
+send mail, so the endpoint reports a delivery failure instead of pretending the
+message went out — `POST /auth/email/start` answers **502** when the mail server
+refuses it, and **200** only after the message was accepted.
+
+### Local development
+
+Nothing to configure. With `DEV_EMAIL_MODE=true` (the default) the link is
+printed to the backend console and kept in an in-memory dev outbox, so the whole
+flow is testable without SMTP.
+
+### Gmail / Google Workspace
+
+Gmail refuses a normal account password over SMTP — it answers
+`535-5.7.8 Username and Password not accepted` even when the password is
+correct. You need an **App Password**:
+
+1. Turn on **2-Step Verification** on the sending account:
+   <https://myaccount.google.com/signinoptions/twosv>
+   (App Passwords do not exist until 2FA is on.)
+2. Create an App Password — choose *Mail* and name the device:
+   <https://myaccount.google.com/apppasswords>
+3. Google shows **16 characters in four groups**, e.g. `abcd efgh ijkl mnop`.
+   Copy them into `SMTP_PASSWORD`. The spaces are presentation only; the backend
+   strips them, but storing it without spaces is clearer.
+4. **Restart the backend.** `.env` is read once at startup, so an edited value
+   does nothing until the process restarts.
+
+```env
+SMTP_HOST=smtp.gmail.com
+SMTP_PORT=465
+SMTP_SECURE=true
+SMTP_USER=you@yourdomain.com
+SMTP_PASSWORD=abcdefghijklmnop
+SMTP_FROM=YOLOPulse <you@yourdomain.com>
+DEV_EMAIL_MODE=false
+```
+
+Notes:
+
+- **Port and TLS go together.** 465 is implicit TLS (`SMTP_SECURE=true`); 587 is
+  STARTTLS (`SMTP_SECURE=false`). Leave `SMTP_SECURE` blank and the correct
+  value is derived from the port. 465 with `secure=false` will hang.
+- **`SMTP_FROM` must be the authenticated account** or an alias Google allows it
+  to send as. An unrelated address is rewritten or rejected.
+- `SMTP_PASS` and `EMAIL_FROM` are still accepted as older names for
+  `SMTP_PASSWORD` and `SMTP_FROM`.
+
+### Checking the configuration
+
+The backend verifies SMTP once at startup and prints the result. It never prints
+the password — only whether one is set and how long it is, which is exactly what
+distinguishes a correct 16-character app password from a pasted 19-character one:
+
+```
+[email] SMTP ready { host: 'smtp.gmail.com', port: 465, secure: true,
+                     user: 'you@yourdomain.com', passwordConfigured: true,
+                     passwordLength: 16, consoleMode: false }
+```
+
+A failure is logged as `[email] SMTP verification FAILED` with the SMTP `code`,
+`responseCode` and `command`. It never blocks startup: a broken mail
+configuration must not take the whole API down.
+
 ## Reddit Integration
 
 YOLOPulse is an external web app, not a Reddit-hosted Devvit app.

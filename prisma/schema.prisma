@@ -454,16 +454,29 @@ model DeletedOrChangedContentEvents {
 }
 
 /// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+/// Only ever stores a HASH of the token — the value that reaches the user's
+/// inbox is never written down, so a database read cannot mint a valid link.
+///
+/// `status` is what makes a failed send safe. A token is created PENDING, and
+/// only becomes SENT once the mail server has accepted the message. Nothing but
+/// a SENT token can complete a verification, so the row left behind by a failed
+/// delivery is inert rather than a working link nobody received.
 model EmailVerificationTokens {
   id        String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   userId    String    @map("user_id") @db.Uuid
   tokenHash String    @unique @map("token_hash")
+  /// `pending` | `sent` | `failed`.
+  status    String    @default("pending")
+  /// What the token authorizes, e.g. `email_registration`.
+  purpose   String    @default("email_registration")
   expiresAt DateTime  @map("expires_at") @db.Timestamptz(6)
   usedAt    DateTime? @map("used_at") @db.Timestamptz(6)
+  sentAt    DateTime? @map("sent_at") @db.Timestamptz(6)
   createdAt DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
   appUsers  AppUsers  @relation(fields: [userId], references: [id], onDelete: Cascade, onUpdate: NoAction)
 
   @@index([tokenHash], map: "email_verification_tokens_hash_idx")
+  @@index([userId, status], map: "email_verification_tokens_user_status_idx")
   @@map("email_verification_tokens")
 }
 

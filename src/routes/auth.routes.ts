@@ -15,7 +15,13 @@ import {
   loginWithEmail,
   requestPasswordReset,
   resetPassword,
+  normalizeEmail,
+  isValidEmail,
 } from "../services/auth/emailAuth.service.js";
+import {
+  isEmailDeliveryError,
+  smtpErrorDetails,
+} from "../services/email/EmailDeliveryError.js";
 import {
   createSession,
   clearSession,
@@ -81,7 +87,8 @@ function uaOf(req: Request): string | null {
   return req.header("user-agent") ?? null;
 }
 
-// Rate limiters for the sensitive auth endpoints.
+// Rate limiters for the sensitive auth endpoints. The IP limiter is the
+// middleware; the per-address limiter below is applied after the body is read.
 const startLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 10, key: "email-start" });
 const loginLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 20, key: "email-login" });
 const resetLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 10, key: "pw-reset" });
@@ -91,32 +98,116 @@ const resetLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 10, key: "pw-res
 // ═══════════════════════════════════════════════════════════════════════════
 
 /**
+ * Per-address throttle for the signup link.
+ *
+ * The IP limiter alone does not stop one address being mail-bombed from a
+ * botnet, and it is the RECIPIENT who suffers that. Fixed window, in memory —
+ * same trade-off as the IP limiter, and it should move to a shared store when
+ * the API runs on more than one instance.
+ */
+const EMAIL_START_WINDOW_MS = 15 * 60 * 1000;
+const EMAIL_START_MAX = 5;
+const emailStartBuckets = new Map<string, { count: number; resetAt: number }>();
+
+export function emailStartAllowed(normalizedEmail: string): { allowed: boolean; retryAfter: number } {
+  const now = Date.now();
+  const bucket = emailStartBuckets.get(normalizedEmail);
+
+  if (!bucket || now >= bucket.resetAt) {
+    emailStartBuckets.set(normalizedEmail, { count: 1, resetAt: now + EMAIL_START_WINDOW_MS });
+    return { allowed: true, retryAfter: 0 };
+  }
+  if (bucket.count >= EMAIL_START_MAX) {
+    return { allowed: false, retryAfter: Math.ceil((bucket.resetAt - now) / 1000) };
+  }
+  bucket.count += 1;
+  return { allowed: true, retryAfter: 0 };
+}
+
+/** Test hook — the buckets are process-wide and would leak between cases. */
+export function __resetEmailStartLimiter(): void {
+  emailStartBuckets.clear();
+}
+
+/**
+ * How a failed send becomes an HTTP response.
+ *
+ * 502 for a delivery failure: the request was fine, the upstream mail server
+ * was not. 500 for anything else. The message is always the generic one — the
+ * SMTP wording names the sending account and would leak it to every caller.
+ */
+export function emailFailureResponse(
+  err: unknown,
+  message: string,
+): { status: number; message: string } {
+  return { status: isEmailDeliveryError(err) ? 502 : 500, message };
+}
+
+/**
  * POST /auth/email/start
  * Body: { email }
- * Sends a verification / set-password link. Always returns ok to prevent email
- * enumeration (a genuinely malformed email is the only 400).
+ *
+ * Sends a verification / set-password link.
+ *
+ *   400  the address is not a valid email
+ *   429  too many requests for this IP or this address
+ *   502  the mail server refused the message — the link was NOT sent
+ *   200  the message was accepted and the link is live
+ *
+ * The 502 is the point of this handler. It used to log the delivery failure and
+ * answer 200 anyway, so the frontend told people to check an inbox that would
+ * never receive anything, and the unusable token stayed in the database.
+ *
+ * Enumeration safety is unaffected: the response is identical whether or not
+ * the address already has an account. An SMTP outage is infrastructure, not
+ * information about a user, so it is reported honestly.
  */
 authRouter.post(
   "/email/start",
   startLimiter,
   asyncHandler(async (req, res) => {
     const email = typeof req.body?.email === "string" ? req.body.email : "";
+    if (!isValidEmail(email)) {
+      return fail(res, "Please enter a valid email address", 400);
+    }
+
+    const normalized = normalizeEmail(email);
+    const throttle = emailStartAllowed(normalized);
+    if (!throttle.allowed) {
+      res.setHeader("Retry-After", String(throttle.retryAfter));
+      return fail(res, "Too many requests. Please try again later.", 429);
+    }
+
     try {
       await requestEmailSignup(email);
     } catch (err) {
-      // Format errors are safe to surface; anything else must not leak.
       if (err instanceof Error && /valid email/i.test(err.message)) {
         return fail(res, err.message, 400);
       }
-      console.error("email/start failed:", err);
+
+      // Server-side: the fields that identify the fault. Never the password,
+      // never the token, never the link.
+      console.error("[auth] email/start delivery failed", smtpErrorDetails(err));
+      await logAuthEvent({
+        eventType: "email_signup_requested",
+        success: false,
+        ipAddress: ipOf(req),
+        userAgent: uaOf(req),
+      });
+
+      // Client-side: a generic message. A recipient does not need Gmail's
+      // wording, and it would leak the sending account.
+      const mapped = emailFailureResponse(err, "Unable to send verification email");
+      return fail(res, mapped.message, mapped.status);
     }
+
     await logAuthEvent({
       eventType: "email_signup_requested",
       success: true,
       ipAddress: ipOf(req),
       userAgent: uaOf(req),
     });
-    return ok(res, { ok: true });
+    return ok(res, { ok: true, message: "Verification email sent" });
   }),
 );
 
@@ -246,7 +337,12 @@ authRouter.post(
     try {
       await requestPasswordReset(email);
     } catch (err) {
-      console.error("password-reset/start failed:", err);
+      // Same rule as /email/start: an unknown address still returns 200 (no
+      // enumeration), but a mail server that refused the message is reported —
+      // otherwise the user waits forever for a reset that was never sent.
+      console.error("[auth] password-reset/start delivery failed", smtpErrorDetails(err));
+      const mapped = emailFailureResponse(err, "Unable to send password reset email");
+      return fail(res, mapped.message, mapped.status);
     }
     return ok(res, { ok: true });
   }),

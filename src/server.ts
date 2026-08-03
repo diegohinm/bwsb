@@ -8,6 +8,7 @@ import { env, isProduction, isRedditOAuthConfigured } from "./config/env.js";
 import { BRANDING } from "./config/branding.js";
 import { SERVICE_ROLE, providerCallsAllowed } from "./config/serviceRole.js";
 import { getSocialProviderStatus } from "./services/social/index.js";
+import { verifyEmailTransport } from "./services/email/email.service.js";
 import { sessionMiddleware } from "./lib/sessionStore.js";
 import { registerPrismaShutdown } from "./lib/prisma.js";
 import { optionalAuth } from "./middleware/optionalAuth.js";
@@ -148,6 +149,9 @@ const server = app.listen(env.PORT, () => {
       ? "Data: reads DB snapshots; provider calls are ALLOWED in this process (SERVICE_ROLE=all — dev). Run `npm run dev:worker` for ingestion."
       : "Data: reads DB snapshots only — Mindcase/Databento calls are blocked in this process. Ingestion runs in bwsb-worker.",
   );
+  // Check SMTP once at boot so a bad app password shows up in the first lines
+  // of the log rather than in a user's failed signup. It never blocks startup.
+  void verifyEmailTransport();
   void getSocialProviderStatus().then((social) => {
     console.log(
       `Configured social provider: ${social.provider} (${social.status})${

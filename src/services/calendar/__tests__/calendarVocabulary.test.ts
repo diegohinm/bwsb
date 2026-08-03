@@ -121,8 +121,11 @@ describe("the none provider", () => {
     const status = await noneEarningsProvider.getStatus();
     assert.equal(status.configured, false);
     assert.equal(status.isMock, false);
-    assert.deepEqual(await noneEarningsProvider.getEarningsEvents(), []);
-    assert.deepEqual(await noneEarningsProvider.getTickerEarnings(), []);
+    assert.deepEqual(
+      await noneEarningsProvider.getEarningsEvents("2026-08-01", "2026-08-31", ["RDDT"]),
+      [],
+    );
+    assert.deepEqual(await noneEarningsProvider.getTickerEarnings("RDDT"), []);
   });
 });
 

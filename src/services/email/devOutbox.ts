@@ -1,4 +1,4 @@
-import { isProduction, env } from "../../config/env.js";
+import { useConsoleEmailMode } from "../../config/smtp.js";
 
 /**
  * In-memory development outbox for transactional emails.
@@ -25,19 +25,14 @@ export interface DevOutboxEntry {
   createdAt: string;
 }
 
-/** Console mode is active only when we are NOT sending real SMTP email. */
-function smtpConfigured(): boolean {
-  return Boolean(env.SMTP_HOST && env.SMTP_PORT);
-}
-
 /**
  * The dev outbox is enabled only outside production AND only while email is in
- * console mode (dev flag on, or SMTP unconfigured). This keeps links out of any
- * HTTP surface as soon as real mail delivery is configured or NODE_ENV=production.
+ * console mode. It shares ONE definition of console mode with the email service
+ * (config/smtp.ts) — when the two disagreed, the outbox believed SMTP was on
+ * while the sender believed it was off, and links went nowhere.
  */
 export function isDevOutboxEnabled(): boolean {
-  if (isProduction) return false;
-  return env.DEV_EMAIL_MODE || !smtpConfigured();
+  return useConsoleEmailMode();
 }
 
 const MAX_ENTRIES = 50;

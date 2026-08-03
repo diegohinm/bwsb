@@ -100,17 +100,13 @@ const envSchema = z.object({
     .default("dev-only-insecure-session-secret-change-me"),
 
   // ── Email (verification + password reset) ──────────────────────────────────
-  EMAIL_FROM: z
-    .string()
-    .default("YOLOPulse <no-reply@yolopulse.com>"),
-  SMTP_HOST: optionalNonEmpty,
-  SMTP_PORT: z.coerce.number().int().positive().optional(),
-  SMTP_USER: optionalNonEmpty,
-  SMTP_PASS: optionalNonEmpty,
-  SMTP_SECURE: boolFromString(false),
-  // When true (or when SMTP is not configured) emails are printed to the
-  // backend console instead of being sent. Must be false in production.
-  DEV_EMAIL_MODE: boolFromString(true),
+  //
+  // Deliberately NOT declared here. The SMTP variables — SMTP_HOST, SMTP_PORT,
+  // SMTP_SECURE, SMTP_USER, SMTP_PASSWORD (or SMTP_PASS), SMTP_FROM (or
+  // EMAIL_FROM) and DEV_EMAIL_MODE — are read and normalized in config/smtp.ts,
+  // which owns the port/secure pairing and strips the spaces out of a Google app
+  // password. Declaring them in two places is how a configured SMTP_FROM ended
+  // up being ignored, so there is exactly one parser.
 
   // ── Reddit OAuth 2.0 (OPTIONAL / future) ───────────────────────────────────
   // All optional. The client secret is server-side only and never sent to the
