@@ -7,7 +7,7 @@ import {
 } from "../config/adminAccess.js";
 
 /**
- * Gate for INTERNAL tooling endpoints (the Reddit scanner test harness).
+ * Gate for INTERNAL tooling endpoints (the Reddit provider diagnostics).
  *
  * Access is granted when ANY of these holds:
  *   1. this is not a production environment — local dev and tests are open;

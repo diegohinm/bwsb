@@ -322,10 +322,11 @@ export class MindcaseSocialDataProvider implements SocialDataProvider {
 
     if (!title && !text) return null;
 
+    const flair = str(r.flair) ?? str(r.linkFlairText);
     const cls = classifySocialItem({
       title,
       text,
-      flair: str(r.flair) ?? str(r.linkFlairText),
+      flair,
       url,
       isComment,
       hasMedia,
@@ -352,6 +353,7 @@ export class MindcaseSocialDataProvider implements SocialDataProvider {
       stance: cls.stance,
       confidence: cls.confidence,
       isScreenshot: cls.isScreenshot,
+      ...(flair ? { flair } : {}),
     };
   }
 

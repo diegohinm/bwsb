@@ -39,7 +39,7 @@ export interface PersistPostsResult {
 /**
  * Persist normalized posts — the ONE way anything writes Reddit content.
  *
- * Both the scheduled worker and the internal scanner page (`persist=true`) call
+ * The scheduled worker calls
  * this, so the upsert contract is defined once: keyed on the Reddit id, never
  * duplicating, never overwriting a stored body with null, accumulating
  * `sources`, refreshing `lastSeenAt`. Ticker detection runs here too, so a post

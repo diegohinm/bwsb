@@ -40,7 +40,7 @@ process.env.DATABASE_URL = "postgresql://test:test@127.0.0.1:1/testdb";
 /**
  * Retry/backoff knobs are FORCED, not defaulted.
  *
- * Code paths that resolve the process configuration themselves (the scanner
+ * Code paths that resolve the process configuration themselves (the diagnostics
  * controller does) would otherwise inherit the real `.env` — 3 retries with a
  * 5s base backoff turns a single failure-path assertion into a 35-second test.
  * Tests assert behaviour, never patience.

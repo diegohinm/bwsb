@@ -69,7 +69,14 @@ function sanitize(err: unknown): string {
  * Run a job once, timing it and recording the outcome in `worker_runs`.
  * Returns true when the job succeeded. Never throws.
  */
-export async function runJobOnce(name: string, fn: JobFn): Promise<boolean> {
+export type RunRecorder = (run: Parameters<typeof recordWorkerRun>[0]) => Promise<void>;
+
+export async function runJobOnce(
+  name: string,
+  fn: JobFn,
+  /** Injectable so the loop's timing behaviour can be tested without a database. */
+  record: RunRecorder = safeRecord,
+): Promise<boolean> {
   const startedAt = new Date();
   try {
     const { status, metadata } = splitOutcome((await fn()) ?? undefined);
@@ -80,7 +87,7 @@ export async function runJobOnce(name: string, fn: JobFn): Promise<boolean> {
         metadata ? ` ${JSON.stringify(metadata)}` : ""
       }`,
     );
-    await safeRecord({
+    await record({
       workerName: WORKER_NAME,
       jobName: name,
       status,
@@ -95,7 +102,7 @@ export async function runJobOnce(name: string, fn: JobFn): Promise<boolean> {
     const durationMs = finishedAt.getTime() - startedAt.getTime();
     const message = sanitize(err);
     console.error(`[worker] ${name}: FAILED after ${durationMs}ms — ${message}`);
-    await safeRecord({
+    await record({
       workerName: WORKER_NAME,
       jobName: name,
       status: "error",
@@ -154,8 +161,10 @@ export function startJobLoop(options: {
   run: JobFn;
   /** Delay the first execution, used to stagger jobs on boot. */
   initialDelayMs?: number;
+  /** Injectable run recorder — tests supply a no-op instead of a database. */
+  record?: RunRecorder;
 }): JobLoopHandle {
-  const { name, intervalSeconds, run, initialDelayMs = 0 } = options;
+  const { name, intervalSeconds, run, initialDelayMs = 0, record = safeRecord } = options;
   let running = false;
   let stopped = false;
 
@@ -164,7 +173,7 @@ export function startJobLoop(options: {
     if (running) {
       // Previous run still in flight — skip this tick rather than pile up.
       console.warn(`[worker] ${name}: previous run still active, skipping tick`);
-      await safeRecord({
+      await record({
         workerName: WORKER_NAME,
         jobName: name,
         status: "skipped",
@@ -177,7 +186,7 @@ export function startJobLoop(options: {
     }
     running = true;
     try {
-      await runJobOnce(name, run);
+      await runJobOnce(name, run, record);
     } finally {
       running = false;
     }

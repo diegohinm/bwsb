@@ -260,7 +260,7 @@ export class MindcaseProvider implements RedditDataProvider {
    * The upstream's validation complaint, in one sanitized line.
    *
    * Two passes of redaction, because this string reaches both a log line and
-   * the scanner UI: the generic credential scrubber, then an exact-match strip
+   * an operator: the generic credential scrubber, then an exact-match strip
    * of our own key in case the upstream echoed the Authorization header back.
    */
   private describeRejection(error: RedditProviderError): string {

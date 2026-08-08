@@ -156,8 +156,8 @@ const envSchema = z.object({
    *
    * The app has no user-role column: identity is email-based and every account
    * is equal. This allowlist is the ONLY thing that makes a signed-in user an
-   * admin, and it exists so internal tooling (the Reddit scanner page) can be
-   * reached in production without putting ADMIN_SECRET in a browser.
+   * admin, and it exists so internal tooling can be reached in production
+   * without putting ADMIN_SECRET in a browser.
    *
    * Empty (the default) means NOBODY is an admin — internal pages are then
    * development-only. Compared case-insensitively against the user's email.

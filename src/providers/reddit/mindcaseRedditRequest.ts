@@ -3,8 +3,8 @@
  *
  * WHY THIS FILE EXISTS
  * The app speaks a normalized dialect internally — `{ provider, subreddit,
- * sort, limit, persist }` from the scanner page, `RedditFetchPostsInput` inside
- * the provider layer. Mindcase's agent speaks a different one, and sending ours
+ * sort, limit, persist }` at the ingestion boundary, `RedditFetchPostsInput`
+ * inside the provider layer. Mindcase's agent speaks a different one, and sending ours
  * verbatim is what produced HTTP 422:
  *
  *   ours       { provider, subreddit, sort, limit, persist }

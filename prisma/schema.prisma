@@ -868,33 +868,33 @@ model RedditAttachments {
 ///
 /// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
 model RedditComments {
-  redditCommentId String       @id @map("reddit_comment_id")
-  redditPostId    String?      @map("reddit_post_id")
+  redditCommentId String    @id @map("reddit_comment_id")
+  redditPostId    String?   @map("reddit_post_id")
   subreddit       String
-  authorHash      String       @map("author_hash")
-  bodyExcerpt     String?      @map("body_excerpt")
-  score           Int          @default(0)
-  redditCreatedAt DateTime?    @map("reddit_created_at") @db.Timestamptz(6)
-  createdAt       DateTime     @default(now()) @map("created_at") @db.Timestamptz(6)
+  authorHash      String    @map("author_hash")
+  bodyExcerpt     String?   @map("body_excerpt")
+  score           Int       @default(0)
+  redditCreatedAt DateTime? @map("reddit_created_at") @db.Timestamptz(6)
+  createdAt       DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
 
   // ── Provider provenance (src/providers/reddit/) ───────────────────────────
   /// Reddit fullname (`t1_<id>`).
-  fullname        String?
+  fullname   String?
   /// Parent fullname: `t1_…` for a reply, `t3_…` for a top-level comment.
-  parentId        String?      @map("parent_id")
-  permalink       String?
+  parentId   String?   @map("parent_id")
+  permalink  String?
   /// Provider treated as authoritative for this row.
-  source          String?
+  source     String?
   /// Every provider that has returned this record.
-  sources         String[]     @default([])
+  sources    String[]  @default([])
   /// When the row was first captured.
-  fetchedAt       DateTime?    @map("fetched_at") @db.Timestamptz(6)
+  fetchedAt  DateTime? @map("fetched_at") @db.Timestamptz(6)
   /// When a provider last confirmed the record still exists.
-  lastSeenAt      DateTime?    @map("last_seen_at") @db.Timestamptz(6)
+  lastSeenAt DateTime? @map("last_seen_at") @db.Timestamptz(6)
   /// Upstream payload, stored only when REDDIT_STORE_SOURCE_METADATA=true.
-  rawData         Json?        @map("raw_data")
+  rawData    Json?     @map("raw_data")
 
-  redditPosts     RedditPosts? @relation(fields: [redditPostId], references: [redditPostId], onDelete: Cascade, onUpdate: NoAction)
+  redditPosts RedditPosts? @relation(fields: [redditPostId], references: [redditPostId], onDelete: Cascade, onUpdate: NoAction)
 
   @@index([authorHash], map: "reddit_comments_author_idx")
   @@index([redditPostId], map: "reddit_comments_post_idx")
@@ -916,33 +916,33 @@ model RedditComments {
 ///
 /// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
 model RedditPosts {
-  redditPostId       String               @id @map("reddit_post_id")
-  subreddit          String
-  title              String
-  bodyExcerpt        String?              @map("body_excerpt")
-  authorHash         String               @map("author_hash")
-  score              Int                  @default(0)
-  numComments        Int                  @default(0) @map("num_comments")
-  permalink          String?
-  redditCreatedAt    DateTime?            @map("reddit_created_at") @db.Timestamptz(6)
-  createdAt          DateTime             @default(now()) @map("created_at") @db.Timestamptz(6)
+  redditPostId    String    @id @map("reddit_post_id")
+  subreddit       String
+  title           String
+  bodyExcerpt     String?   @map("body_excerpt")
+  authorHash      String    @map("author_hash")
+  score           Int       @default(0)
+  numComments     Int       @default(0) @map("num_comments")
+  permalink       String?
+  redditCreatedAt DateTime? @map("reddit_created_at") @db.Timestamptz(6)
+  createdAt       DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
 
   // ── Provider provenance (src/providers/reddit/) ───────────────────────────
   /// Reddit fullname (`t3_<id>`).
-  fullname           String?
+  fullname    String?
   /// External link a link-post points at; null for self posts.
-  url                String?
-  upvoteRatio        Decimal?             @map("upvote_ratio") @db.Decimal
+  url         String?
+  upvoteRatio Decimal?  @map("upvote_ratio") @db.Decimal
   /// Provider treated as authoritative for this row.
-  source             String?
+  source      String?
   /// Every provider that has returned this record.
-  sources            String[]             @default([])
+  sources     String[]  @default([])
   /// When the row was first captured.
-  fetchedAt          DateTime?            @map("fetched_at") @db.Timestamptz(6)
+  fetchedAt   DateTime? @map("fetched_at") @db.Timestamptz(6)
   /// When a provider last confirmed the record still exists.
-  lastSeenAt         DateTime?            @map("last_seen_at") @db.Timestamptz(6)
+  lastSeenAt  DateTime? @map("last_seen_at") @db.Timestamptz(6)
   /// Upstream payload, stored only when REDDIT_STORE_SOURCE_METADATA=true.
-  rawData            Json?                @map("raw_data")
+  rawData     Json?     @map("raw_data")
 
   bets               Bets[]
   ddQualityScores    DdQualityScores?
@@ -1041,32 +1041,34 @@ model SignalScores {
 
 /// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
 model SocialComments {
-  id             String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  externalId     String    @unique @map("external_id")
+  id             String                 @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  externalId     String                 @unique @map("external_id")
   provider       String?
   source         String?
   subreddit      String?
-  postExternalId String?   @map("post_external_id")
+  postExternalId String?                @map("post_external_id")
   body           String?
   url            String?
-  authorHash     String?   @map("author_hash")
+  authorHash     String?                @map("author_hash")
   score          Int?
   tickers        String[]
   sentiment      String?
   stance         String?
-  confidence     Decimal?  @db.Decimal
-  postedAt       DateTime? @map("posted_at") @db.Timestamptz(6)
-  fetchedAt      DateTime  @default(now()) @map("fetched_at") @db.Timestamptz(6)
+  confidence     Decimal?               @db.Decimal
+  postedAt       DateTime?              @map("posted_at") @db.Timestamptz(6)
+  fetchedAt      DateTime               @default(now()) @map("fetched_at") @db.Timestamptz(6)
+  tickerLinks    SocialCommentTickers[]
 
   @@index([subreddit, postedAt(sort: Desc)], map: "social_comments_subreddit_idx")
+  @@index([postExternalId, postedAt(sort: Desc)], map: "social_comments_post_external_idx")
   @@index([tickers], map: "social_comments_tickers_gin", type: Gin)
   @@map("social_comments")
 }
 
 /// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
 model SocialPosts {
-  id           String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  externalId   String    @unique @map("external_id")
+  id           String              @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  externalId   String              @unique @map("external_id")
   provider     String?
   source       String?
   subreddit    String?
@@ -1074,19 +1076,27 @@ model SocialPosts {
   title        String?
   body         String?
   url          String?
-  authorHash   String?   @map("author_hash")
+  authorHash   String?             @map("author_hash")
   score        Int?
-  commentCount Int?      @map("comment_count")
+  commentCount Int?                @map("comment_count")
   tickers      String[]
   sentiment    String?
   stance       String?
-  confidence   Decimal?  @db.Decimal
-  isScreenshot Boolean   @default(false) @map("is_screenshot")
-  postedAt     DateTime? @map("posted_at") @db.Timestamptz(6)
-  fetchedAt    DateTime  @default(now()) @map("fetched_at") @db.Timestamptz(6)
+  confidence   Decimal?            @db.Decimal
+  isScreenshot Boolean             @default(false) @map("is_screenshot")
+  /// "REGULAR" | "DAILY_DISCUSSION". Decided once, at ingestion, by
+  /// services/social/dailyDiscussion.service.ts — never re-derived from the
+  /// title at read time.
+  postCategory String              @default("REGULAR") @map("post_category")
+  postedAt     DateTime?           @map("posted_at") @db.Timestamptz(6)
+  fetchedAt    DateTime            @default(now()) @map("fetched_at") @db.Timestamptz(6)
+  /// Normalized associations. `tickers` above stays as the GIN-indexed display
+  /// projection of the rows here that clear the confidence threshold.
+  tickerLinks  SocialPostTickers[]
 
   @@index([postedAt(sort: Desc)], map: "social_posts_posted_idx")
   @@index([subreddit, postedAt(sort: Desc)], map: "social_posts_subreddit_idx")
+  @@index([postCategory, subreddit, postedAt(sort: Desc)], map: "social_posts_daily_discussion_idx")
   @@index([tickers], map: "social_posts_tickers_gin", type: Gin)
   @@map("social_posts")
 }
@@ -1306,7 +1316,10 @@ model Tickers {
   tickerMetrics5m            TickerMetrics5m[]
   tickerPositioningIndexes   TickerPositioningIndexes[]
   tickerStanceEvents         TickerStanceEvents[]
+  tickerAliases              TickerAliases[]
   tickerTrendClassifications TickerTrendClassifications[]
+  socialPostTickers          SocialPostTickers[]
+  socialCommentTickers       SocialCommentTickers[]
   virtualPositions           VirtualPositions[]
   virtualTrades              VirtualTrades[]
 
@@ -1995,4 +2008,63 @@ model VirtualEquitySnapshots {
   @@index([virtualAccountId, calculatedAt(sort: Desc)], map: "virtual_equity_snapshots_account_idx")
   @@index([userId, calculatedAt(sort: Desc)], map: "virtual_equity_snapshots_user_idx")
   @@map("virtual_equity_snapshots")
+}
+
+/// Which securities a stored Reddit post refers to, and how sure we are.
+///
+/// The FK to `tickers` is the validation: a symbol outside the catalog cannot
+/// be recorded at all, so extraction can never invent one. `confidence` decides
+/// whether the association is shown publicly; `source` and `matchedText` exist
+/// so a false positive can be traced back to the text that produced it.
+model SocialPostTickers {
+  socialPostId String   @map("social_post_id") @db.Uuid
+  ticker       String
+  confidence   Decimal  @db.Decimal(4, 3)
+  /// "cashtag" | "symbol" | "alias"
+  source       String
+  matchedText  String?  @map("matched_text")
+  createdAt    DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  socialPost SocialPosts @relation(fields: [socialPostId], references: [id], onDelete: Cascade)
+  tickers    Tickers     @relation(fields: [ticker], references: [ticker], onDelete: Cascade)
+
+  @@id([socialPostId, ticker])
+  @@index([ticker], map: "social_post_tickers_ticker_idx")
+  @@index([ticker, confidence(sort: Desc)], map: "social_post_tickers_confidence_idx")
+  @@map("social_post_tickers")
+}
+
+/// The comment-side equivalent of SocialPostTickers.
+model SocialCommentTickers {
+  socialCommentId String   @map("social_comment_id") @db.Uuid
+  ticker          String
+  confidence      Decimal  @db.Decimal(4, 3)
+  source          String
+  matchedText     String?  @map("matched_text")
+  createdAt       DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  socialComment SocialComments @relation(fields: [socialCommentId], references: [id], onDelete: Cascade)
+  tickers       Tickers        @relation(fields: [ticker], references: [ticker], onDelete: Cascade)
+
+  @@id([socialCommentId, ticker])
+  @@index([ticker], map: "social_comment_tickers_ticker_idx")
+  @@map("social_comment_tickers")
+}
+
+/// Company names and common nicknames that resolve to a ticker.
+///
+/// `requiresContext` marks an alias that is also an ordinary word or a place
+/// ("apple", "amazon", "meta", "target"). Those only count when the surrounding
+/// text is recognizably financial, which is what separates "I bought Apple
+/// stock" from "I ate an apple".
+model TickerAliases {
+  alias           String   @id
+  ticker          String
+  requiresContext Boolean  @default(false) @map("requires_context")
+  createdAt       DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  tickers Tickers @relation(fields: [ticker], references: [ticker], onDelete: Cascade)
+
+  @@index([ticker], map: "ticker_aliases_ticker_idx")
+  @@map("ticker_aliases")
 }

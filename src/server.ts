@@ -9,8 +9,8 @@ import { BRANDING } from "./config/branding.js";
 import { SERVICE_ROLE, providerCallsAllowed } from "./config/serviceRole.js";
 import { getSocialProviderStatus } from "./services/social/index.js";
 import { verifyEmailTransport } from "./services/email/email.service.js";
-import { sessionMiddleware } from "./lib/sessionStore.js";
-import { registerPrismaShutdown } from "./lib/prisma.js";
+import { closeSessionPool, sessionMiddleware } from "./lib/sessionStore.js";
+import { registerPrismaShutdown, registerProcessSafetyNet } from "./lib/prisma.js";
 import { optionalAuth } from "./middleware/optionalAuth.js";
 import { healthRouter } from "./routes/health.routes.js";
 import { authRouter } from "./routes/auth.routes.js";
@@ -38,7 +38,6 @@ import { productRouter } from "./routes/product.routes.js";
 import { personalRouter } from "./routes/personal.routes.js";
 import { meAccountRouter } from "./routes/meAccount.routes.js";
 import { internalRedditRouter } from "./routes/internalReddit.routes.js";
-import { internalRedditScannerRouter } from "./routes/internalRedditScannerRoutes.js";
 import { internalRedditEventsRouter } from "./routes/internalRedditEvents.routes.js";
 import { attachDiscussionSocket } from "./realtime/discussionSocket.js";
 import { discussionSource } from "./realtime/discussionSource.js";
@@ -127,8 +126,6 @@ app.use("/api", redditVerificationRouter);
 app.use("/admin", adminRedditVerificationRouter);
 // Internal Reddit provider diagnostics (x-admin-secret applied inside).
 app.use("/api", internalRedditRouter);
-// Internal Reddit scanner test harness (dev-open, admin-only in production).
-app.use("/api/internal/reddit/scanner", internalRedditScannerRouter);
 // Service-to-service realtime bridge from the ingestion worker. Guarded by a
 // shared secret inside the router; deliberately NOT in the CORS allowlist —
 // no browser should ever reach it.
@@ -163,22 +160,42 @@ const server = app.listen(env.PORT, "0.0.0.0", () => {
       ? "Data: reads DB snapshots; provider calls are ALLOWED in this process (SERVICE_ROLE=all — dev). Run `npm run dev:worker` for ingestion."
       : "Data: reads DB snapshots only — Mindcase/Databento calls are blocked in this process. Ingestion runs in bwsb-worker.",
   );
-  // Check SMTP once at boot so a bad app password shows up in the first lines
-  // of the log rather than in a user's failed signup. It never blocks startup.
-  void verifyEmailTransport();
-  void getSocialProviderStatus().then((social) => {
-    console.log(
-      `Configured social provider: ${social.provider} (${social.status})${
-        social.message ? ` — ${social.message}` : ""
-      }`,
+  // Two boot diagnostics. Both are deliberately fire-and-forget — neither is
+  // allowed to delay the port from accepting traffic — but both carry their own
+  // catch. A `void x()` or a bare `.then()` here leaves a rejected promise with
+  // no handler, and `getSocialProviderStatus` reads the database, so a pooler
+  // shortage at boot would surface as an unexplained "unhandled rejection".
+  verifyEmailTransport().catch((err: unknown) =>
+    console.error(
+      "[API] SMTP verification failed:",
+      err instanceof Error ? err.message : err,
+    ),
+  );
+
+  getSocialProviderStatus()
+    .then((social) => {
+      console.log(
+        `Configured social provider: ${social.provider} (${social.status})${
+          social.message ? ` — ${social.message}` : ""
+        }`,
+      );
+    })
+    .catch((err: unknown) =>
+      console.error(
+        "[API] could not read social provider status:",
+        err instanceof Error ? err.message : err,
+      ),
     );
-  });
 });
 
 // Realtime Discussion feed shares this HTTP server rather than opening a second
 // port: one origin, one TLS certificate, and the existing CORS/proxy setup
 // applies unchanged.
 const discussionWss = attachDiscussionSocket(server);
+
+// A net under the process, not a substitute for handling promises: every known
+// async call above has its own catch, so this firing means a new bug.
+registerProcessSafetyNet("API");
 
 // On SIGTERM/SIGINT (a Render redeploy, a local Ctrl-C): stop accepting new
 // connections, let in-flight requests finish, then release the Prisma pool.
@@ -187,4 +204,8 @@ registerPrismaShutdown("api", async () => {
   for (const client of discussionWss.clients) client.close(1001, "Server shutting down");
   discussionWss.close();
   await new Promise<void>((resolve) => server.close(() => resolve()));
+  // The session store keeps its own pg pool, so it holds pooler slots that
+  // Prisma's disconnect does not release. Closed here, after the server has
+  // stopped accepting requests that might still need a session.
+  await closeSessionPool();
 });

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it, beforeEach } from "node:test";
 
-import { discussionHub } from "../discussionHub.js";
+import { discussionHub, GLOBAL_SCOPE } from "../discussionHub.js";
 import {
   DISCUSSION_EVENT_TYPES,
   toAuthorHandle,
@@ -37,6 +37,7 @@ function samplePost(ticker: string): DiscussionEvent {
       upvotes: 1,
       commentCount: 0,
       sentiment: "bullish",
+      tickers: [],
       permalink: null,
       createdAt: new Date().toISOString(),
     },
@@ -108,6 +109,85 @@ describe("discussion hub routing", () => {
   it("publishing to nobody is free and reports no watchers", () => {
     assert.doesNotThrow(() => discussionHub.publish(samplePost("ZZZZ")));
     assert.equal(discussionHub.subscriberCount("ZZZZ"), 0);
+  });
+});
+
+/**
+ * The global room is what the /discussion page subscribes to. Its whole job is
+ * to see EVERYTHING without the per-ticker rooms noticing, and — the part worth
+ * a test — without a reader who is subscribed to both getting the same event
+ * twice on one screen.
+ */
+describe("discussion hub global scope", () => {
+  const cleanups: (() => void)[] = [];
+
+  beforeEach(() => {
+    while (cleanups.length) cleanups.pop()?.();
+  });
+
+  it("receives events for every ticker", () => {
+    const seen: DiscussionFrame[] = [];
+    cleanups.push(discussionHub.subscribe(GLOBAL_SCOPE, (f) => seen.push(f)));
+
+    discussionHub.publish(samplePost("MSFT"));
+    discussionHub.publish(samplePost("NVDA"));
+    discussionHub.publish(samplePost("GME"));
+
+    assert.equal(seen.length, 3);
+  });
+
+  it("delivers to the ticker room and the global room exactly once each", () => {
+    const global: DiscussionFrame[] = [];
+    const ticker: DiscussionFrame[] = [];
+    cleanups.push(discussionHub.subscribe(GLOBAL_SCOPE, (f) => global.push(f)));
+    cleanups.push(discussionHub.subscribe("MSFT", (f) => ticker.push(f)));
+
+    discussionHub.publish(samplePost("MSFT"));
+
+    assert.equal(global.length, 1, "no duplicate in the global room");
+    assert.equal(ticker.length, 1, "no duplicate in the ticker room");
+  });
+
+  it("does not leak global traffic into a ticker room", () => {
+    const ticker: DiscussionFrame[] = [];
+    cleanups.push(discussionHub.subscribe(GLOBAL_SCOPE, () => {}));
+    cleanups.push(discussionHub.subscribe("MSFT", (f) => ticker.push(f)));
+
+    discussionHub.publish(samplePost("NVDA"));
+
+    assert.equal(ticker.length, 0);
+  });
+
+  it("reports whether anyone is watching globally, so the source can idle", () => {
+    assert.equal(discussionHub.hasGlobalSubscribers(), false);
+    const stop = discussionHub.subscribe(GLOBAL_SCOPE, () => {});
+    assert.equal(discussionHub.hasGlobalSubscribers(), true);
+    stop();
+    assert.equal(discussionHub.hasGlobalSubscribers(), false);
+  });
+
+  it("keeps the ticker room alive when the last global reader leaves", () => {
+    const ticker: DiscussionFrame[] = [];
+    const stopGlobal = discussionHub.subscribe(GLOBAL_SCOPE, () => {});
+    cleanups.push(discussionHub.subscribe("AMD", (f) => ticker.push(f)));
+
+    stopGlobal();
+    discussionHub.publish(samplePost("AMD"));
+
+    assert.equal(ticker.length, 1);
+  });
+
+  it("still serves the ticker room when a global listener throws", () => {
+    let survivor = 0;
+    cleanups.push(
+      discussionHub.subscribe(GLOBAL_SCOPE, () => {
+        throw new Error("broken socket");
+      }),
+    );
+    cleanups.push(discussionHub.subscribe("AAPL", () => (survivor += 1)));
+
+    assert.doesNotThrow(() => discussionHub.publish(samplePost("AAPL")));
+    assert.equal(survivor, 1);
   });
 });
 

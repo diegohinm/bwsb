@@ -2,6 +2,13 @@ import type { SocialComments, SocialPosts } from "@prisma/client";
 
 import { prisma } from "../lib/prisma.js";
 import { num } from "../lib/numeric.js";
+import {
+  loadTickerCatalog,
+  saveCommentTickers,
+  savePostTickers,
+} from "./tickerAssociations.repository.js";
+import { extractFromParts } from "../services/extraction/tickerExtraction.service.js";
+import { classifyPostCategory } from "../services/social/dailyDiscussion.service.js";
 import type {
   SocialContentType,
   SocialDataProviderName,
@@ -81,10 +88,11 @@ export async function saveSocialItems(
 ): Promise<{ posts: number; comments: number }> {
   let posts = 0;
   let comments = 0;
+  const pending: PendingAssociation[] = [];
 
   for (const it of items) {
     if (it.type === COMMENT_TYPE) {
-      await prisma.socialComments.upsert({
+      const row = await prisma.socialComments.upsert({
         where: { externalId: it.id },
         create: {
           externalId: it.id,
@@ -113,9 +121,10 @@ export async function saveSocialItems(
           fetchedAt: new Date(),
         },
       });
+      pending.push({ kind: "comment", rowId: row.id, item: it });
       comments += 1;
     } else {
-      await prisma.socialPosts.upsert({
+      const row = await prisma.socialPosts.upsert({
         where: { externalId: it.id },
         create: {
           externalId: it.id,
@@ -134,11 +143,17 @@ export async function saveSocialItems(
           stance: it.stance,
           confidence: it.confidence,
           isScreenshot: it.isScreenshot,
+          // Classified HERE, once, so the read path is an indexed filter
+          // rather than a title match it cannot index.
+          postCategory: classifyPostCategory(it.title, it.subreddit, it.flair),
           postedAt: it.createdAt,
         },
         update: {
           score: it.score ?? null,
           commentCount: it.numComments ?? null,
+          // Re-evaluated on update too: a post edited into (or out of) the
+          // daily format must not keep a stale category forever.
+          postCategory: classifyPostCategory(it.title, it.subreddit, it.flair),
           tickers: it.tickers,
           sentiment: it.sentiment,
           stance: it.stance,
@@ -147,11 +162,53 @@ export async function saveSocialItems(
           fetchedAt: new Date(),
         },
       });
+      pending.push({ kind: "post", rowId: row.id, item: it });
       posts += 1;
     }
   }
 
+  await attachTickers(pending);
+
   return { posts, comments };
+}
+
+type PendingAssociation = {
+  kind: "post" | "comment";
+  rowId: string;
+  item: SocialPostItem;
+};
+
+/**
+ * Extract and persist ticker associations for freshly stored content.
+ *
+ * RUNS AFTER PERSISTENCE, AND CANNOT UNDO IT. The content rows are already
+ * committed by the time this is called, and every failure path below is
+ * swallowed and logged. A catalog read that times out, or one item whose text
+ * trips the extractor, must never cost us the Reddit post itself — the
+ * association can be recovered later by `social:backfill-tickers`, the post
+ * cannot be recovered at all once the provider window has moved on.
+ */
+async function attachTickers(pending: PendingAssociation[]): Promise<void> {
+  if (pending.length === 0) return;
+
+  let catalog;
+  try {
+    // Once per batch, not once per item.
+    catalog = await loadTickerCatalog();
+  } catch (err) {
+    console.error("[social] ticker catalog unavailable, skipping extraction:", err);
+    return;
+  }
+
+  for (const entry of pending) {
+    try {
+      const matches = extractFromParts(catalog, entry.item.title, entry.item.text);
+      if (entry.kind === "post") await savePostTickers(entry.rowId, matches);
+      else await saveCommentTickers(entry.rowId, matches);
+    } catch (err) {
+      console.error(`[social] ticker extraction failed for ${entry.item.id}:`, err);
+    }
+  }
 }
 
 export interface PulseSnapshotInput {

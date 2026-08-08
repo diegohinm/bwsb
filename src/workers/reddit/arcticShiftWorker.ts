@@ -41,7 +41,8 @@ import type { RedditWorkerStore } from "./redditWorkerStore.js";
  * next turn, and after `ARCTIC_SHIFT_MAX_RETRIES` consecutive failures it is
  * cooled down so a permanently broken community cannot eat every Nth slot.
  *
- * THE MANUAL SCANNER IS NOT AFFECTED. `POST /api/internal/reddit/scanner/test`
+ * NOTHING ELSE SHARES THIS BUDGET. The manual scanner page that used to run
+ * ad-hoc fetches has been removed, so this worker is now the only caller
  * builds its own provider and never touches the guard, the rotation index or
  * the cursors. That is deliberate: the operator debugging an upstream must not
  * be made to wait five minutes, and their scan must not shift the worker's

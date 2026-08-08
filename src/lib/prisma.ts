@@ -33,16 +33,32 @@ if (!isProduction) {
  * Called from the API and worker shutdown handlers so a SIGTERM (a Render
  * redeploy, a local Ctrl-C) returns connections to Supabase instead of leaving
  * them to time out.
+ *
+ * IDEMPOTENT BY LATCH, not just by Prisma's own tolerance: the promise of the
+ * first call is reused, so two shutdown paths racing each other produce one
+ * disconnect rather than two. Long-running processes must never call this
+ * outside shutdown — a `$disconnect` after each request or job forces the next
+ * caller to reopen a pooler session, which is the opposite of what a shared
+ * pool is for.
  */
+let disconnectPromise: Promise<void> | null = null;
+
 export async function disconnectPrisma(): Promise<void> {
-  try {
-    await prisma.$disconnect();
-  } catch (err) {
-    console.error(
-      "[prisma] error during disconnect:",
-      err instanceof Error ? err.message : err,
-    );
-  }
+  disconnectPromise ??= prisma
+    .$disconnect()
+    .catch((err: unknown) =>
+      console.error(
+        "[prisma] error during disconnect:",
+        err instanceof Error ? err.message : err,
+      ),
+    )
+    .then(() => undefined);
+  return disconnectPromise;
+}
+
+/** Test seam: forget that a disconnect happened. */
+export function resetDisconnectLatchForTests(): void {
+  disconnectPromise = null;
 }
 
 /**
@@ -56,10 +72,21 @@ export async function disconnectPrisma(): Promise<void> {
  *                  disconnected so in-flight work can still write to the
  *                  database.
  */
+let shutdownRegistered = false;
+
 export function registerPrismaShutdown(
   label: string,
   onSignal?: (signal: string) => Promise<void> | void,
 ): void {
+  // ONE registration per process. A second call — from a stray import, a test
+  // that loads the entrypoint twice — would add a second pair of handlers and
+  // run the whole teardown twice.
+  if (shutdownRegistered) {
+    console.warn(`[${label}] shutdown handlers already registered — ignoring duplicate call`);
+    return;
+  }
+  shutdownRegistered = true;
+
   let shuttingDown = false;
 
   const shutdown = async (signal: string): Promise<void> => {
@@ -67,6 +94,8 @@ export function registerPrismaShutdown(
     shuttingDown = true;
 
     try {
+      // Schedulers and servers stop FIRST, while the pool is still open, so
+      // in-flight work can finish its writes.
       await onSignal?.(signal);
     } catch (err) {
       console.error(
@@ -80,6 +109,37 @@ export function registerPrismaShutdown(
     process.exit(0);
   };
 
-  process.on("SIGTERM", () => void shutdown("SIGTERM"));
-  process.on("SIGINT", () => void shutdown("SIGINT"));
+  // `once`, not `on`: a second Ctrl-C should reach the default handler and kill
+  // a wedged process rather than being swallowed by the in-progress shutdown.
+  process.once("SIGTERM", () => void shutdown("SIGTERM"));
+  process.once("SIGINT", () => void shutdown("SIGINT"));
+}
+
+/** Test seam: allow a fresh registration. */
+export function resetShutdownRegistrationForTests(): void {
+  shutdownRegistered = false;
+}
+
+/**
+ * Last-resort logging for promises nobody handled.
+ *
+ * This is a NET, NOT A FIX. Every known floating promise in this codebase has
+ * its own catch; if this handler ever fires in normal operation, that is a bug
+ * to find, not a condition to tolerate. It exists so the failure is named in
+ * the log instead of arriving as a bare stack trace, and — for an uncaught
+ * exception, where the process state really is unknown — so shutdown is
+ * orderly rather than abrupt.
+ */
+export function registerProcessSafetyNet(label: string): void {
+  process.on("unhandledRejection", (reason) => {
+    console.error(
+      `[${label}] unhandled rejection — this is a bug, not an expected condition:`,
+      reason instanceof Error ? `${reason.name}: ${reason.message}` : reason,
+    );
+  });
+
+  process.on("uncaughtException", (err) => {
+    console.error(`[${label}] uncaught exception:`, err);
+    void disconnectPrisma().finally(() => process.exit(1));
+  });
 }

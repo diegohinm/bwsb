@@ -17,6 +17,9 @@ export interface AuthUser {
   id: string;
   email: string;
   displayName: string | null;
+  /** ISO instant of verification, or null. The source of truth. */
+  emailVerifiedAt: string | null;
+  /** Derived from emailVerifiedAt in this serializer. Never set independently. */
   emailVerified: boolean;
   /** Resolved avatar URL — the user's own, or the global default frog. */
   avatarUrl: string;
@@ -67,6 +70,12 @@ export async function getAuthUserById(userId: string): Promise<AuthUser | null> 
     id: user.id,
     email: user.email,
     displayName: user.displayName,
+    /**
+     * THE canonical field. `emailVerified` below is derived from it HERE, in
+     * the one serializer, so the two can never contradict each other — and no
+     * consumer has to decide whether a date string is truthy.
+     */
+    emailVerifiedAt: user.emailVerifiedAt ? user.emailVerifiedAt.toISOString() : null,
     emailVerified: user.emailVerifiedAt != null,
     // Whitespace-only avatar_url counts as "no avatar" — same rule as the
     // frontend helper (fwsb/src/lib/avatar.ts) so both sides agree.

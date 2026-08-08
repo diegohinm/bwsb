@@ -33,15 +33,15 @@ export const internalRedditRouter = Router();
 /**
  * GET /api/internal/reddit/config
  *
- * The ingestion configuration an operator needs to read the scanner page: which
- * communities the worker rotates through, how fast it rotates, and which
- * provider mode is active.
+ * The ingestion configuration an operator needs when debugging the worker:
+ * which communities it rotates through, how fast it rotates, and which provider
+ * mode is active. Read with curl and an `x-admin-secret` header — there is no
+ * UI for it, by design.
  *
  * SAFE BY CONSTRUCTION — the response is BUILT FIELD BY FIELD from values that
  * are already public knowledge inside the product. No API key, no token, no
  * base URL, no header, and no `...spread` of a config object that might grow a
- * secret later. Guarded by `requireInternalOrAdmin`, the same middleware as the
- * scanner itself.
+ * secret later. Guarded by `requireInternalOrAdmin`.
  */
 internalRedditRouter.get(
   "/internal/reddit/config",

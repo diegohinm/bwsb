@@ -18,7 +18,7 @@ import { toObservedError } from "../providerObserver.js";
 /**
  * The reddit/posts agent contract.
  *
- * These tests exist because the scanner's normalized request
+ * These tests exist because the app's normalized request
  * (`{ provider, subreddit, sort, limit }`) was being sent to Mindcase verbatim
  * and answered with HTTP 422, and because the follow-up payload used
  * `startUrls`, which this account's agent rejects with
@@ -308,7 +308,7 @@ describe("HTTP 422 from the posts agent", () => {
     }
   });
 
-  it("reaches the scanner as a sanitized, stack-free error", async () => {
+  it("surfaces as a sanitized, stack-free error", async () => {
     const fetchStub = stubFetch(() => ({ status: 422, body: BAD_FIELD_BODY }));
     try {
       const provider = new MindcaseProvider(testConfig());

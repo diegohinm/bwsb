@@ -2,12 +2,12 @@ import { RedditProviderError, sanitizeProviderError } from "./providerErrors.js"
 import type { RedditProviderName } from "./types.js";
 
 /**
- * Per-provider call reporting for the internal scanner page.
+ * Per-provider call reporting.
  *
  * A composite provider (hybrid, fallback) normally hides which upstream did
- * what — that is the whole point of the abstraction. The scanner test harness
- * needs exactly that hidden detail so it can show Arctic Shift and Mindcase
- * side by side, so composites accept an optional observer.
+ * what — that is the whole point of the abstraction. Diagnostics and tests need
+ * exactly that hidden detail, to see Arctic Shift and Mindcase side by side, so
+ * composites accept an optional observer.
  *
  * STRICTLY OBSERVATIONAL: an observer can never change what a provider
  * returns, and production ingestion never passes one.

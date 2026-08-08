@@ -84,6 +84,15 @@ export interface SocialPostItem {
   stance: SocialStance;
   confidence: number;
   isScreenshot: boolean;
+  /**
+   * The subreddit's own label for the post, when the source returns one.
+   *
+   * Carried through because it is the most reliable way to recognize a daily
+   * discussion thread: it is the community's classification rather than an
+   * inference from the title. Optional — the current provider does not supply
+   * it for every item, so the title patterns remain the fallback.
+   */
+  flair?: string;
 }
 
 export type SentimentSplit = {

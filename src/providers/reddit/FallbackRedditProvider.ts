@@ -49,8 +49,8 @@ export class FallbackRedditProvider implements RedditDataProvider {
     options: {
       fallbackOnEmpty?: boolean;
       /**
-       * Per-provider outcome reporter for the internal scanner page. Purely
-       * observational; production ingestion leaves it unset.
+       * Per-provider outcome reporter. Purely observational; production
+       * ingestion leaves it unset and the tests use it to assert behaviour.
        */
       observer?: ProviderCallObserver;
     } = {},

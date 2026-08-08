@@ -55,8 +55,8 @@ export class HybridRedditProvider implements RedditDataProvider {
       /** REDDIT_DEDUPLICATE_RESULTS. Off is for debugging only. */
       deduplicate?: boolean;
       /**
-       * Per-provider outcome reporter. Used by the internal scanner page to
-       * show a side-by-side comparison; production ingestion leaves it unset.
+       * Per-provider outcome reporter, for a side-by-side comparison of the
+       * upstreams. Production ingestion leaves it unset.
        * Purely observational — it can never change what is returned.
        */
       observer?: ProviderCallObserver;

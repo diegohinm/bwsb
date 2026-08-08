@@ -20,6 +20,7 @@
  * Usage:
  *   npm run mindcase:agent
  */
+import { isMainModule } from "../lib/jobRunner.js";
 import "dotenv/config";
 
 import { buildRedditDataConfig } from "../config/redditDataConfig.js";
@@ -67,8 +68,10 @@ async function main(): Promise<void> {
   if (!definition.matchesConfiguredInputField) process.exitCode = 1;
 }
 
-main().catch((error) => {
-  // Sanitized: this runs with a real key in the environment.
-  console.error(`Agent inspection failed: ${sanitizeProviderError(error)}`);
-  process.exitCode = 1;
-});
+if (isMainModule(import.meta.url)) {
+  main().catch((error) => {
+    // Sanitized: this runs with a real key in the environment.
+    console.error(`Agent inspection failed: ${sanitizeProviderError(error)}`);
+    process.exitCode = 1;
+  });
+}

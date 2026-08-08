@@ -10,9 +10,6 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
 import { buildArcticShiftWorkerConfig } from "../../../config/reddit.config.js";
-import { testRedditScanner } from "../../../controllers/internalRedditScannerController.js";
-import { validateRedditScannerRequest } from "../../../middleware/validateRedditScannerRequest.js";
-import { stubFetch } from "../../../providers/reddit/__tests__/helpers.js";
 import type { ArcticShiftPage, ArcticShiftPageInput } from "../../../providers/reddit/ArcticShiftProvider.js";
 import { RedditProviderError } from "../../../providers/reddit/providerErrors.js";
 import type { NormalizedRedditPost } from "../../../providers/reddit/types.js";
@@ -118,24 +115,6 @@ function harness(options: {
     deps,
     run: (runOptions) => runArcticShiftCycle(deps(), runOptions ?? {}),
   };
-}
-
-/** The minimal Express response double the scanner controller needs. */
-function mockRes(): { statusCode: number; body: unknown; locals: Record<string, unknown>; status: (c: number) => unknown; json: (b: unknown) => unknown } {
-  const res = {
-    statusCode: 200,
-    body: undefined as unknown,
-    locals: {} as Record<string, unknown>,
-    status(code: number) {
-      res.statusCode = code;
-      return res;
-    },
-    json(payload: unknown) {
-      res.body = payload;
-      return res;
-    },
-  };
-  return res;
 }
 
 function page(posts: NormalizedRedditPost[], hasMore = false): ArcticShiftPage {
@@ -574,59 +553,6 @@ describe("pagination and duplicates", () => {
   it("deduplicate keeps one record per id", () => {
     const posts = [fakePost({ externalId: "a" }), fakePost({ externalId: "a" }), fakePost({ externalId: "b" })];
     assert.equal(deduplicate(posts).length, 2);
-  });
-});
-
-// ── the manual scanner is not the worker ─────────────────────────────────────
-
-describe("manual scanner isolation", () => {
-  it("leaves the rotation, the pacing and the cursors untouched", async () => {
-    const kit = harness({ respond: () => page([fakePost()]) });
-    await kit.run();
-
-    const before = {
-      index: kit.store.state.nextSubredditIndex,
-      lastRequestAt: kit.store.state.lastRequestAt?.toISOString(),
-      requestLog: [...kit.store.state.requestLog],
-      cursor: kit.store.cursors.get("arctic_shift:wallstreetbets:post")?.lastCreatedAt,
-    };
-
-    // A manual scan: the controller's own provider stack, over stubbed HTTP.
-    const fetchStub = stubFetch(() => ({
-      body: {
-        data: [
-          { id: "manual1", title: "manual scan", subreddit: "stocks", created_utc: 1_785_000_000 },
-        ],
-      },
-    }));
-    try {
-      const res = mockRes();
-      let validated = false;
-      const req = {
-        body: { provider: "arctic_shift", subreddit: "stocks", limit: 5, persist: false },
-        headers: {},
-      };
-      validateRedditScannerRequest(req as never, res as never, () => {
-        validated = true;
-      });
-      assert.ok(validated, "the manual request should validate");
-      await testRedditScanner(req as never, res as never);
-      assert.equal((res.body as { success: boolean }).success, true);
-    } finally {
-      fetchStub.restore();
-    }
-
-    assert.equal(kit.store.state.nextSubredditIndex, before.index);
-    assert.equal(kit.store.state.lastRequestAt?.toISOString(), before.lastRequestAt);
-    assert.deepEqual(kit.store.state.requestLog, before.requestLog);
-    assert.equal(
-      kit.store.cursors.get("arctic_shift:wallstreetbets:post")?.lastCreatedAt,
-      before.cursor,
-    );
-
-    // And the worker's next slot is still whatever the worker itself decided.
-    const decision = await kit.guard.check();
-    assert.equal(decision.allowed, false, "a manual scan must not open the worker's next slot");
   });
 });
 

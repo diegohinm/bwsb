@@ -1,5 +1,6 @@
 import { isMainModule, runJobAsScript, type JobMetadata } from "../lib/jobRunner.js";
 import { prisma } from "../lib/prisma.js";
+import { mapWithConcurrency } from "../lib/concurrency.js";
 import { num } from "../lib/numeric.js";
 import {
   ARENA_PERIODS,
@@ -38,17 +39,21 @@ async function publicPrices(symbols: string[], cutoff: Date): Promise<PriceMap> 
   const out: PriceMap = new Map();
 
   // One indexed query per symbol: newest observation at or before the cutoff.
-  await Promise.all(
-    symbols.map(async (symbol) => {
-      const row = await prisma.marketQuoteSnapshots.findFirst({
-        where: { symbol, observedAt: { lte: cutoff }, price: { not: null } },
-        orderBy: { observedAt: "desc" },
-        select: { price: true },
-      });
-      const price = num(row?.price ?? null);
-      if (price !== null && price > 0) out.set(symbol, price);
-    }),
-  );
+  //
+  // BOUNDED. This used to be `Promise.all(symbols.map(...))`, which started one
+  // query per symbol simultaneously — a competition covering a hundred tickers
+  // opened a hundred tasks against a three-connection pool, and the tail of
+  // that queue timed out fetching a connection (P2024) rather than failing on
+  // anything to do with the data.
+  await mapWithConcurrency(symbols, async (symbol) => {
+    const row = await prisma.marketQuoteSnapshots.findFirst({
+      where: { symbol, observedAt: { lte: cutoff }, price: { not: null } },
+      orderBy: { observedAt: "desc" },
+      select: { price: true },
+    });
+    const price = num(row?.price ?? null);
+    if (price !== null && price > 0) out.set(symbol, price);
+  });
 
   return out;
 }

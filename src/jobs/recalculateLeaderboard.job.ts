@@ -1,3 +1,4 @@
+import { isMainModule } from "../lib/jobRunner.js";
 import { prisma, disconnectPrisma } from "../lib/prisma.js";
 import { competitionRepository } from "../repositories/competition.repository.js";
 
@@ -83,4 +84,25 @@ async function main(): Promise<void> {
   );
 }
 
-void main().finally(disconnectPrisma);
+/**
+ * Standalone script entrypoint.
+ *
+ * GUARDED BY `isMainModule`. Without it, merely IMPORTING this file — from a
+ * test, a barrel, an editor's auto-import — would run the whole job and then
+ * call `disconnectPrisma()` on the shared client, closing the pool underneath a
+ * running API or worker. The three jobs that shipped this way were one stray
+ * import away from that.
+ *
+ * The catch is not decoration either: `void main().finally(...)` leaves a
+ * rejected promise with no handler, which is precisely the "[worker] unhandled
+ * rejection" line this pass exists to remove.
+ */
+if (isMainModule(import.meta.url)) {
+  main()
+    .catch((err) => {
+      console.error("[leaderboard:recalculate] failed:", err instanceof Error ? err.message : err);
+      process.exitCode = 1;
+    })
+    .finally(() => void disconnectPrisma());
+}
+

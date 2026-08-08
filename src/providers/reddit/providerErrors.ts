@@ -36,7 +36,7 @@ export class RedditProviderError extends Error {
    *
    * SERVER-SIDE ONLY. It exists so a provider can read a 422 and say WHICH
    * field was rejected; it is never serialized into an HTTP response — the
-   * scanner sends `toObservedError()`, which carries a code and a sanitized
+   * observer sends `toObservedError()`, which carries a code and a sanitized
    * sentence and nothing else.
    */
   readonly details?: unknown;
@@ -120,7 +120,7 @@ export function isFallbackEligibleError(error: unknown): boolean {
  * Strip anything credential-shaped out of free text.
  *
  * Used on every string that crosses a boundary — a log line, the status
- * endpoint, `worker_runs`, an upstream error body echoed back to the scanner.
+ * endpoint, `worker_runs`, an upstream error body surfaced in a diagnostic.
  */
 export function sanitizeText(value: string): string {
   return value

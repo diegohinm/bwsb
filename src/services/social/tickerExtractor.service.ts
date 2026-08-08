@@ -1,8 +1,14 @@
 /**
  * Extract stock tickers from free text.
  *
+ * PROVISIONAL ONLY. Since ticker associations became catalog-backed, whatever
+ * this produces is overwritten by the validated extraction in
+ * services/extraction/tickerExtraction.service.ts as soon as the row is stored.
+ * It survives because the in-memory aggregators (pulse, WSB portfolio) read
+ * `SocialPostItem.tickers` before persistence.
+ *
  * Two detection modes:
- *   1. `$`-prefixed cashtags ($NVDA, $RDDT) — always accepted, 1-5 letters.
+ *   1. `$`-prefixed cashtags ($NVDA, $RDDT) — validated against the allowlist.
  *   2. Bare uppercase words — accepted ONLY when on the allowlist, so common
  *      English/finance words (AI, IT, CEO, YOLO…) don't become false tickers.
  *
@@ -48,7 +54,11 @@ export function extractTickers(text: string | undefined | null): string[] {
   const found = new Set<string>();
 
   for (const m of text.matchAll(CASHTAG)) {
-    found.add(m[1].toUpperCase());
+    const symbol = m[1].toUpperCase();
+    // A `$` proves the author meant a security, NOT that one exists. Accepting
+    // the prefix on its own is how $DRAM, $SPCX and $BURU were stored as
+    // tickers; the symbol still has to be one we recognize.
+    if (allowlist.has(symbol)) found.add(symbol);
   }
 
   for (const m of text.matchAll(BARE_WORD)) {

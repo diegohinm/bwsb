@@ -7,8 +7,10 @@ import {
 } from "./config/redditDataConfig.js";
 import { SERVICE_ROLE, isApiRole } from "./config/serviceRole.js";
 import { WORKER_NAME } from "./config/ingestion.js";
-import { startJobLoop, type JobLoopHandle } from "./lib/jobRunner.js";
-import { registerPrismaShutdown } from "./lib/prisma.js";
+import { isMainModule, startJobLoop, type JobLoopHandle } from "./lib/jobRunner.js";
+import { prisma, registerPrismaShutdown, registerProcessSafetyNet } from "./lib/prisma.js";
+import { withDbRetry } from "./lib/dbRetry.js";
+import { setTickerAllowlist } from "./services/social/tickerExtractor.service.js";
 import { refreshMarketQuotes } from "./jobs/refreshMarketQuotes.job.js";
 import { refreshMarketMovers } from "./jobs/refreshMarketMovers.job.js";
 import { refreshSocialPulse } from "./jobs/refreshSocialPulse.job.js";
@@ -46,8 +48,66 @@ import type { ArcticShiftWorkerHandle } from "./workers/reddit/arcticShiftWorker
  */
 
 const loops: JobLoopHandle[] = [];
+/** Holds the event loop open while every job timer is unref'd. */
+let keepAliveTimer: ReturnType<typeof setInterval> | undefined;
 /** The paced Arctic Shift loop, when ARCTIC_SHIFT_ENABLED=true. */
 let arcticShiftWorker: ArcticShiftWorkerHandle | undefined;
+
+/**
+ * Widen the provisional extractor's allowlist to the real catalog.
+ *
+ * Without this it only ever knew 24 hard-coded symbols, so anything else was
+ * dropped from `SocialPostItem.tickers` before the in-memory aggregators saw it.
+ *
+ * AWAITED, NOT FIRE-AND-FORGET. The first version launched this as a floating
+ * promise beside the schedulers, so a cold start ran the catalog read at the
+ * same instant every job opened its first connection — the moment the pooler is
+ * least able to serve one. Now it completes (or gives up) before any job is
+ * scheduled, and it retries transient failures with backoff instead of losing
+ * the allowlist for the lifetime of the process.
+ *
+ * It is NOT fatal. The authoritative associations are catalog-validated later,
+ * against the database, so a worker that boots without the allowlist still
+ * ingests correctly — it just falls back to the static symbol list for the
+ * provisional in-memory value.
+ */
+async function primeTickerAllowlist(): Promise<void> {
+  try {
+    const rows = await withDbRetry(
+      () => prisma.tickers.findMany({ where: { isActive: true }, select: { ticker: true } }),
+      { label: "primeTickerAllowlist" },
+    );
+    setTickerAllowlist(rows.map((r) => r.ticker));
+    console.log(`[worker] ticker allowlist primed with ${rows.length} symbols`);
+  } catch (err) {
+    console.error(
+      "[worker] could not prime ticker allowlist — continuing with the static list:",
+      err instanceof Error ? err.message : err,
+    );
+  }
+}
+
+/**
+ * One trivial query before anything is scheduled.
+ *
+ * Booting a dozen job loops against an unreachable database produces a dozen
+ * near-simultaneous failures and a dozen retries; failing this once, slowly,
+ * says the same thing far more cheaply. Not fatal either — the worker is
+ * supposed to survive a database that comes back.
+ */
+async function checkDatabaseReachable(): Promise<boolean> {
+  try {
+    await withDbRetry(() => prisma.$queryRaw`SELECT 1`, { label: "worker boot health check" });
+    console.log("[worker] database reachable");
+    return true;
+  } catch (err) {
+    console.error(
+      "[worker] database is NOT reachable at boot — schedulers will start anyway and retry:",
+      err instanceof Error ? err.message : err,
+    );
+    return false;
+  }
+}
 
 function banner(): void {
   console.log(
@@ -98,8 +158,24 @@ function estimatedMinutesPerSubreddit(): number {
   );
 }
 
-function start(): void {
-  banner();
+let schedulersStarted = false;
+
+/**
+ * Start every job loop. Idempotent.
+ *
+ * The guard is not theoretical: a module with a side effect at import time, or
+ * an entrypoint loaded twice, would otherwise register a second full set of
+ * intervals against the same connection pool — every job running twice as
+ * often, each pair racing for the same three connections.
+ */
+export function startSchedulers(): void {
+  if (schedulersStarted) {
+    console.warn("[worker] schedulers already started — ignoring duplicate call");
+    return;
+  }
+  schedulersStarted = true;
+  // Handles from a previous run are stale once their timers are cleared.
+  loops.length = 0;
 
   // Staggered first runs so a cold start does not hit both providers at once,
   // and so the strip job runs after the social/market data it depends on.
@@ -195,7 +271,15 @@ function start(): void {
         `~${estimatedMinutesPerSubreddit()} min per subreddit`,
     );
     // Fire-and-forget: the loop awaits its own pacing and stops on shutdown.
-    void arcticShiftWorker.start();
+    // The catch is required, not stylistic — this promise lives for the whole
+    // process, so without one a single rejection deep in the paced loop becomes
+    // an unhandled rejection with no indication of where it came from.
+    arcticShiftWorker.start().catch((err: unknown) =>
+      console.error(
+        "[worker] arcticShift loop stopped with an error:",
+        err instanceof Error ? err.message : err,
+      ),
+    );
 
     if (env.REDDIT_INGESTION_ENABLED) {
       console.warn(
@@ -223,41 +307,76 @@ function start(): void {
   // Keep the process alive even when every timer is unref'd.
   const keepAlive = setInterval(() => {}, 1 << 30);
 
+  keepAliveTimer = keepAlive;
+}
+
+/**
+ * Stop scheduling. Idempotent, and safe to call before `startSchedulers`.
+ *
+ * Only stops the CLOCK. Work already in flight keeps its connection and is
+ * given a grace period by the caller — killing it here would abandon a
+ * half-written snapshot.
+ */
+export function stopSchedulers(): void {
+  for (const loop of loops) loop.stop();
+  // The handles are DELIBERATELY kept. `activeJobNames()` reads them to decide
+  // how long to wait for in-flight work, so emptying the array here would make
+  // the grace period believe nothing was running and disconnect the pool out
+  // from under a job mid-write.
+  arcticShiftWorker?.stop();
+  if (keepAliveTimer) {
+    clearInterval(keepAliveTimer);
+    keepAliveTimer = undefined;
+  }
+  schedulersStarted = false;
+}
+
+/** True while any scheduled job is mid-execution. */
+function activeJobNames(): string[] {
+  const names = loops.filter((l) => l.isRunning()).map((l) => l.name);
+  if (arcticShiftWorker?.isRunning()) names.push("arcticShiftCycle");
+  return names;
+}
+
+async function main(): Promise<void> {
+  banner();
+
+  // Boot order: configuration, then connectivity, then caches, then signal
+  // handlers, and only then the schedulers. Registering the handlers before the
+  // loops means a SIGTERM arriving mid-boot is still handled.
+  await checkDatabaseReachable();
+  await primeTickerAllowlist();
+
+  registerProcessSafetyNet("worker");
+
   // Stop scheduling, let in-flight jobs finish their writes, then disconnect
   // Prisma (registerPrismaShutdown runs this callback first, so the grace period
   // below still has a live connection pool).
   registerPrismaShutdown("worker", async (signal) => {
     console.log(`[worker] ${signal} received — stopping schedulers…`);
-    for (const loop of loops) loop.stop();
-    // Stops SCHEDULING; the request in flight is allowed to finish its write.
-    arcticShiftWorker?.stop();
-    clearInterval(keepAlive);
+    stopSchedulers();
 
     // Give in-flight jobs a bounded grace period to finish their DB writes.
     const deadline = Date.now() + 15_000;
-    while (
-      (loops.some((l) => l.isRunning()) || arcticShiftWorker?.isRunning()) &&
-      Date.now() < deadline
-    ) {
+    while (activeJobNames().length > 0 && Date.now() < deadline) {
       await new Promise((r) => setTimeout(r, 250));
     }
-    const stillRunning = loops.filter((l) => l.isRunning()).map((l) => l.name);
-    if (arcticShiftWorker?.isRunning()) stillRunning.push("arcticShiftCycle");
+    const stillRunning = activeJobNames();
     if (stillRunning.length > 0) {
       console.warn(`[worker] still running at shutdown: ${stillRunning.join(", ")}`);
     }
   });
 
-  // A stray rejection must never kill the worker — log it and keep scheduling.
-  process.on("unhandledRejection", (reason) => {
-    console.error(
-      "[worker] unhandled rejection:",
-      reason instanceof Error ? reason.message : reason,
-    );
-  });
-  process.on("uncaughtException", (err) => {
-    console.error("[worker] uncaught exception:", err instanceof Error ? err.message : err);
-  });
+  startSchedulers();
+  console.log("[worker] ready.");
 }
 
-start();
+// GUARDED, so importing this module in a test does not boot a second worker —
+// the exact class of import side effect that lets two sets of schedulers run
+// against one connection pool.
+if (isMainModule(import.meta.url)) {
+  main().catch((err) => {
+    console.error("[worker] fatal error during startup:", err);
+    process.exitCode = 1;
+  });
+}

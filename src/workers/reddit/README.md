@@ -69,11 +69,11 @@ silently drop every post the archive had not indexed yet.
 
 ## What it does NOT govern
 
-`POST /api/internal/reddit/scanner/test` — the admin Reddit Scanner — builds its
-own provider and touches none of this: not the guard, not the rotation index,
-not the cursors. An operator debugging an upstream must not be made to wait five
-minutes, and their scan must not shift the worker's schedule. The page says so
-in as many words.
+Nothing else. The admin Reddit Scanner page that used to run ad-hoc fetches has
+been removed, so this worker is the only thing driving Arctic Shift and the only
+holder of the request budget. Diagnose an upstream through the worker's logs and
+`GET /api/internal/reddit/providers/status`, which performs no provider call and
+therefore cannot disturb the schedule.
 
 ## Running it
 

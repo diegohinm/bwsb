@@ -3,7 +3,7 @@ import type { Server } from "node:http";
 import { WebSocketServer, WebSocket } from "ws";
 
 import { env } from "../config/env.js";
-import { discussionHub } from "./discussionHub.js";
+import { discussionHub, GLOBAL_SCOPE } from "./discussionHub.js";
 import { discussionSource } from "./discussionSource.js";
 import type { DiscussionFrame } from "./discussionEvents.js";
 
@@ -37,7 +37,28 @@ function send(socket: WebSocket, frame: DiscussionFrame): void {
   socket.send(JSON.stringify(frame));
 }
 
-function attachTicker(socket: Live, raw: string | null): void {
+/**
+ * Subscribe a socket to one ticker, or to everything.
+ *
+ * `scope=all` is the /discussion page. It is a SEPARATE parameter from
+ * `ticker` on purpose: the global room's key is `*`, which the symbol validator
+ * rejects, so no client can reach it by passing a clever ticker string.
+ */
+function attachTicker(socket: Live, raw: string | null, globalScope = false): void {
+  if (globalScope) {
+    socket.unsubscribe?.();
+    socket.ticker = GLOBAL_SCOPE;
+    socket.unsubscribe = discussionHub.subscribe(GLOBAL_SCOPE, (frame) => send(socket, frame));
+    send(socket, {
+      kind: "hello",
+      ticker: GLOBAL_SCOPE,
+      transport: "websocket",
+      sourceMode: discussionSource.mode,
+      pollIntervalMs: discussionSource.intervalMs,
+    });
+    return;
+  }
+
   const ticker = (raw ?? "").trim().toUpperCase();
   if (!SYMBOL.test(ticker)) {
     // A bad symbol closes the socket rather than silently subscribing to
@@ -71,7 +92,8 @@ export function attachDiscussionSocket(server: Server): WebSocketServer {
     });
 
     const url = new URL(request.url ?? PATH, env.BACKEND_URL);
-    attachTicker(socket, url.searchParams.get("ticker"));
+    const scope = url.searchParams.get("scope");
+    attachTicker(socket, url.searchParams.get("ticker"), scope === "all");
 
     // The one message a client may send: follow a different symbol on the same
     // connection, so switching tickers does not cost a reconnect.
@@ -83,8 +105,9 @@ export function attachDiscussionSocket(server: Server): WebSocketServer {
           typeof parsed === "object" &&
           (parsed as { type?: unknown }).type === "subscribe"
         ) {
-          const next = (parsed as { ticker?: unknown }).ticker;
-          if (typeof next === "string") attachTicker(socket, next);
+          const message = parsed as { ticker?: unknown; scope?: unknown };
+          if (message.scope === "all") attachTicker(socket, null, true);
+          else if (typeof message.ticker === "string") attachTicker(socket, message.ticker);
         }
       } catch {
         // Unparseable input is ignored: this channel has no command surface.

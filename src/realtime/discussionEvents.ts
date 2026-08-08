@@ -26,6 +26,23 @@ export type DiscussionEventType = (typeof DISCUSSION_EVENT_TYPES)[number];
 /** The final classification only — never a confidence score or a percentage. */
 export type DiscussionSentiment = "bullish" | "neutral" | "bearish";
 
+/**
+ * A security the content refers to, already validated and scored server-side.
+ *
+ * The frontend renders this and nothing else — it never scans title or body for
+ * uppercase words. Detection happens once during ingestion, against the ticker
+ * catalog, and is stored; see services/extraction/tickerExtraction.service.ts.
+ *
+ * `confidence` is carried so a client can reason about strength if it ever
+ * needs to, but the API has already dropped everything below the display
+ * threshold: an item that reaches here is one we are prepared to show.
+ */
+export interface DiscussionTicker {
+  symbol: string;
+  companyName: string | null;
+  confidence: number;
+}
+
 export interface DiscussionPost {
   id: string;
   ticker: string;
@@ -38,6 +55,8 @@ export interface DiscussionPost {
   upvotes: number | null;
   commentCount: number | null;
   sentiment: DiscussionSentiment;
+  /** Validated securities this post refers to. Empty when none was confident. */
+  tickers: DiscussionTicker[];
   /** The original Reddit URL. Null when the source stored none. */
   permalink: string | null;
   createdAt: string;
@@ -55,6 +74,7 @@ export interface DiscussionComment {
   /** Replies to this comment, when the source recorded it. */
   replyCount: number | null;
   sentiment: DiscussionSentiment;
+  tickers: DiscussionTicker[];
   permalink: string | null;
   createdAt: string;
 }

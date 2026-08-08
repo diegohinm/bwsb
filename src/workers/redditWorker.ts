@@ -4,7 +4,7 @@ import {
   getRedditDataConfig,
 } from "../config/redditDataConfig.js";
 import { isMainModule, runJobAsScript, type JobMetadata } from "../lib/jobRunner.js";
-import { disconnectPrisma } from "../lib/prisma.js";
+import { disconnectPrisma, registerProcessSafetyNet } from "../lib/prisma.js";
 import { getRedditDataProvider } from "../providers/reddit/RedditProviderFactory.js";
 import { ingestRedditPosts } from "../services/redditIngestionService.js";
 import { buildArcticShiftWorker } from "./reddit/startArcticShiftWorker.js";
@@ -98,6 +98,8 @@ async function runStandaloneArcticShiftWorker(): Promise<never> {
       `realtime=${isEventPublishingConfigured() ? "on" : "off"}`,
   );
 
+  registerProcessSafetyNet("RedditWorker");
+
   const worker = buildArcticShiftWorker();
   const runOnce = process.argv.includes("--once");
 
@@ -143,6 +145,15 @@ if (isMainModule(import.meta.url)) {
     );
     process.exit(1);
   } else {
-    void runStandaloneArcticShiftWorker();
+    // Returns `never` in the happy path, so the only way out is a throw — which
+    // without this catch would be an unhandled rejection in a process whose
+    // whole job is to stay up.
+    runStandaloneArcticShiftWorker().catch((err: unknown) => {
+      console.error(
+        "[RedditWorker] fatal error:",
+        err instanceof Error ? err.message : err,
+      );
+      process.exitCode = 1;
+    });
   }
 }

@@ -12,9 +12,20 @@ import type { DiscussionEvent, DiscussionFrame } from "./discussionEvents.js";
  *   - a future transport subscribes here and the producers do not change.
  *
  * Subscriptions are keyed by TICKER, so a socket watching MSFT is never woken
- * for NVDA traffic. The hub also reports whether anyone is listening at all, so
- * the source can stop doing work when the feed is unwatched.
+ * for NVDA traffic. A subscriber can also take the GLOBAL scope and receive
+ * everything — that is what the /discussion page uses.
+ *
+ * The hub reports whether anyone is listening at all, so the source can stop
+ * doing work when nothing is being watched.
  */
+
+/**
+ * The room every event is also published to.
+ *
+ * Not a ticker, and not reachable as one: the symbol validator upstream rejects
+ * `*`, so no client can subscribe to it by accident or by guessing.
+ */
+export const GLOBAL_SCOPE = "*";
 
 export type DiscussionListener = (frame: DiscussionFrame) => void;
 
@@ -42,19 +53,37 @@ class DiscussionHub {
     };
   }
 
+  /**
+   * Deliver an event to the ticker's watchers AND to the global room.
+   *
+   * A client watching MSFT and a client watching everything both receive it,
+   * exactly once each. A client that somehow held both subscriptions would get
+   * it twice, which is why a socket is only ever in one room.
+   */
   publish(event: DiscussionEvent): void {
-    const listeners = this.byTicker.get(event.ticker.toUpperCase());
-    if (!listeners || listeners.size === 0) return;
-    this.published += 1;
+    const rooms = [this.byTicker.get(event.ticker.toUpperCase()), this.byTicker.get(GLOBAL_SCOPE)];
     const frame: DiscussionFrame = { kind: "event", event };
-    for (const listener of listeners) {
-      try {
-        listener(frame);
-      } catch (err) {
-        // One broken socket must never stop the others from being served.
-        console.error("[discussion] listener failed:", err);
+    let delivered = false;
+
+    for (const listeners of rooms) {
+      if (!listeners || listeners.size === 0) continue;
+      delivered = true;
+      for (const listener of listeners) {
+        try {
+          listener(frame);
+        } catch (err) {
+          // One broken socket must never stop the others from being served.
+          console.error("[discussion] listener failed:", err);
+        }
       }
     }
+
+    if (delivered) this.published += 1;
+  }
+
+  /** True when at least one client is watching everything. */
+  hasGlobalSubscribers(): boolean {
+    return (this.byTicker.get(GLOBAL_SCOPE)?.size ?? 0) > 0;
   }
 
   /** Send a non-event frame (heartbeat) to everyone watching a ticker. */
