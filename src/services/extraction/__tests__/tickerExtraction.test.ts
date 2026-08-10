@@ -6,7 +6,6 @@ import {
   displayable,
   extractFromParts,
   extractTickerMatches,
-  DISPLAY_THRESHOLD,
 } from "../tickerExtraction.service.js";
 
 /**
@@ -99,13 +98,10 @@ describe("common-word symbols need context", () => {
     assert.deepEqual(shown("$AI to the moon"), ["AI"]);
   });
 
-  it("still records the weak match internally", () => {
-    // Rejected for display, kept for review — that record is what makes the
-    // threshold tunable later instead of guessed at.
-    const all = extractTickerMatches("AI is changing everything.", catalog);
-    assert.equal(all.length, 1);
-    assert.equal(all[0]?.symbol, "AI");
-    assert.ok(all[0]!.confidence < DISPLAY_THRESHOLD);
+  it("records nothing at all — the match is rejected, not hidden", () => {
+    // A stored-but-hidden row still has to be reasoned about by every consumer
+    // and still reads as an "association" in the data.
+    assert.deepEqual(extractTickerMatches("AI is changing everything.", catalog), []);
   });
 
   it("does not badge ordinary prose containing ON or F", () => {

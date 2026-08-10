@@ -30,7 +30,7 @@
  *   0.85  NVDA                bare symbol, unambiguous in the catalog
  *   0.85  "Nvidia"            unambiguous company name
  *   0.80  "Apple stock"       context-gated alias with a security noun beside it
- *   0.55  "AI stocks"         common-word symbol, bare mention        → hidden
+ *   ----  "AI stocks"         ambiguous symbol, bare mention          → rejected
  *   ----  "I ate an apple"    context-gated alias, no adjacent noun → not returned
  *
  * DISPLAY_THRESHOLD sits at 0.75, so the last two never reach a reader.
@@ -335,27 +335,21 @@ export function extractTickerMatches(
     const nearby = hasNearbyContext(text, position);
 
     if (entry.isCommonWord) {
-      // A BARE MENTION OF A COMMON-WORD SYMBOL IS NEVER STRONG ENOUGH.
+      // AMBIGUOUS: a bare mention is REJECTED outright, not stored weakly.
       //
-      // Adjacency was the second attempt and it still failed on real data:
-      // "AI stocks", "AI spending", "AI moat investing", "AI Memory Demand" —
-      // every surviving match in the corpus was artificial intelligence, not
-      // C3.ai. The word is simply too common in this domain for any amount of
-      // surrounding vocabulary to disambiguate it.
+      // Every one-character symbol lands here, plus the hand-reviewed set (AI,
+      // ON, IT). "THIS IS A GREAT STOCK" must not associate Agilent, and no
+      // amount of surrounding vocabulary changes that — a capital letter in
+      // prose is not evidence about a security. The author has to say so:
+      // `$A` (the cashtag branch above) or the company name (the alias branch
+      // below) both still work.
       //
-      // So these symbols are reachable only by evidence the AUTHOR supplied:
-      // an explicit `$AI` cashtag (handled above) or the company name via an
-      // alias ("c3.ai"). The bare form is recorded below the display threshold
-      // — visible to a later review, never to a reader.
-      offer({
-        symbol,
-        confidence: CONFIDENCE.commonWordNoContext,
-        source: "symbol",
-        matchedText: m[0],
-        position,
-      });
+      // Dropping rather than recording at low confidence is deliberate: a
+      // stored-but-hidden row still has to be reasoned about by every consumer
+      // and still shows up as an "association" in the data.
       continue;
     }
+
 
     offer({
       symbol,

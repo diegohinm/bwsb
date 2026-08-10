@@ -1,0 +1,15 @@
+[
+  { "index_symbol": "SPX", "name": "Standard & Poor's 500", "description": "S&P 500 Index" },
+  { "index_symbol": "VIX", "name": "Cboe Volatility Index", "description": "Expected 30-day volatility" },
+  { "index_symbol": "RUT", "name": "Russell 2000 Index", "description": "Russell 2000" },
+  { "index_symbol": "XSP", "name": "Mini Standard & Poor's 500", "description": "Mini S&P 500" },
+  { "index_symbol": "DJX", "name": "1/100th Dow Jones Industrial Average", "description": "DJIA" },
+  { "index_symbol": "OEX", "name": "S&P 100", "description": "S&P 100" },
+  { "index_symbol": "VXN", "name": "Cboe NASDAQ-100 Volatility Index", "description": "NDX volatility" },
+  { "index_symbol": "^RVX", "name": "Cboe Russell 2000 Volatility Index", "description": "RUT volatility" },
+  { "index_symbol": " vvix ", "name": "Cboe VIX of VIX Index", "description": "VIX of VIX" },
+  { "index_symbol": "SPX", "name": "Duplicate S&P 500 entry", "description": "duplicate" },
+  { "index_symbol": "", "name": "No symbol", "description": "malformed" },
+  { "index_symbol": "NONAME", "description": "" },
+  { "index_symbol": "DESCONLY", "description": "Falls back to the description" }
+]

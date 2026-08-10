@@ -35,14 +35,31 @@ export async function loadTickerCatalog(force = false): Promise<TickerCatalog> {
   const [tickers, aliases] = await Promise.all([
     prisma.tickers.findMany({
       where: { isActive: true },
-      select: { ticker: true, isCommonWord: true },
+      select: { ticker: true, isCommonWord: true, isAmbiguous: true },
     }),
     prisma.tickerAliases.findMany({
       select: { alias: true, ticker: true, requiresContext: true },
     }),
   ]);
 
-  const catalog = buildCatalog(tickers, aliases);
+  // THE ONE PLACE the two stored ambiguity signals are combined.
+  //
+  //   is_ambiguous   written by the catalog refresh from
+  //                  config/tickers/ambiguousTickers.ts — every one-character
+  //                  symbol plus the hand-reviewed list.
+  //   is_common_word curated earlier from false positives measured against
+  //                  real posts (TEAM, ARM, COST, SNAP, LUV, …).
+  //
+  // They have different provenance but the same consequence for the detector:
+  // a bare mention proves nothing. Merging them here keeps the RULE in one
+  // config file while letting both sources of evidence feed it.
+  const catalog = buildCatalog(
+    tickers.map((t) => ({
+      ticker: t.ticker,
+      isCommonWord: t.isCommonWord === true || t.isAmbiguous === true,
+    })),
+    aliases,
+  );
   cached = { catalog, loadedAt: now };
   return catalog;
 }

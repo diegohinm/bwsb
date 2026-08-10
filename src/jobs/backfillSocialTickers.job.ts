@@ -3,6 +3,7 @@ import type { Prisma } from "@prisma/client";
 import { isMainModule } from "../lib/jobRunner.js";
 
 import { disconnectPrisma, prisma } from "../lib/prisma.js";
+import { withDbRetry } from "../lib/dbRetry.js";
 import {
   loadTickerCatalog,
   saveCommentTickers,
@@ -54,13 +55,33 @@ export type BackfillOptions = {
   batchSize?: number;
   /** Report rejected/ambiguous tokens. Off by default, as specified. */
   debug?: boolean;
+  /**
+   * Compute everything and write NOTHING.
+   *
+   * Strongly recommended before a run against production data: it reports
+   * exactly how many associations would be added and removed, so a detector
+   * change can be inspected before it is applied.
+   */
+  dryRun?: boolean;
 };
 
 export type BackfillResult = {
   postsScanned: number;
   commentsScanned: number;
   associationsWritten: number;
+  /** Associations present before this run, across the scanned content. */
+  oldAssociations: number;
+  /** Associations the canonical detector produces now. */
+  newAssociations: number;
+  associationsRemoved: number;
+  associationsAdded: number;
+  /**
+   * Bare mentions of an ambiguous symbol the detector refused. This is the
+   * figure that says how much single-letter contamination was cleared.
+   */
+  ambiguousMentionsRejected: number;
   failures: number;
+  dryRun: boolean;
   /** Where to resume from if this run was cut short. */
   lastCursor: string | null;
 };
@@ -69,15 +90,28 @@ export async function backfillSocialTickers(
   options: BackfillOptions = {},
 ): Promise<BackfillResult> {
   const batchSize = options.batchSize ?? BATCH_SIZE;
+  const dryRun = options.dryRun === true;
   const result: BackfillResult = {
     postsScanned: 0,
     commentsScanned: 0,
     associationsWritten: 0,
+    oldAssociations: 0,
+    newAssociations: 0,
+    associationsRemoved: 0,
+    associationsAdded: 0,
+    ambiguousMentionsRejected: 0,
     failures: 0,
+    dryRun,
     lastCursor: null,
   };
+  if (dryRun) console.log("[backfill-tickers] DRY RUN — nothing will be written");
 
-  const catalog = await loadTickerCatalog(true);
+  // Retried: the catalog read is the first thing this job does, and a transient
+  // pooler blip there aborted an entire run before a single batch had been
+  // processed. Nothing had been written, so the failure was safe — just wasteful.
+  const catalog = await withDbRetry(() => loadTickerCatalog(true), {
+    label: "backfill catalog load",
+  });
   if (catalog.bySymbol.size === 0) {
     // Extracting against an empty catalog would validate nothing and wipe every
     // existing association. Refuse rather than quietly destroy data.
@@ -98,7 +132,12 @@ export async function backfillSocialTickers(
 
     const batch: PostBatchRow[] = await prisma.socialPosts.findMany({
       where: pageWhere(cursor, cursorId),
-      select: { id: true, title: true, body: true, fetchedAt: true },
+      // The existing associations come along so the run can report what it
+      // REMOVED, not just what it wrote.
+      select: {
+        id: true, title: true, body: true, fetchedAt: true,
+        tickerLinks: { select: { ticker: true } },
+      },
       orderBy: [{ fetchedAt: "asc" }, { id: "asc" }],
       take: batchSize,
     });
@@ -106,8 +145,12 @@ export async function backfillSocialTickers(
 
     for (const row of batch) {
       try {
+        // The CANONICAL detector — the same call live ingestion makes. The
+        // backfill must never carry its own rules, or reprocessing would
+        // produce a different answer than ingesting the same text.
         const matches = extractFromParts(catalog, row.title, row.body);
-        await savePostTickers(row.id, matches);
+        tally(result, row.tickerLinks.map((l) => l.ticker), matches.map((m) => m.symbol));
+        if (!dryRun) await savePostTickers(row.id, matches);
         result.associationsWritten += matches.length;
         if (options.debug) logRejected(row.id, matches);
       } catch (err) {
@@ -139,7 +182,10 @@ export async function backfillSocialTickers(
 
     const batch: CommentBatchRow[] = await prisma.socialComments.findMany({
       where: pageWhere(cursor, cursorId) as Prisma.SocialCommentsWhereInput,
-      select: { id: true, body: true, fetchedAt: true },
+      select: {
+        id: true, body: true, fetchedAt: true,
+        tickerLinks: { select: { ticker: true } },
+      },
       orderBy: [{ fetchedAt: "asc" }, { id: "asc" }],
       take: batchSize,
     });
@@ -148,7 +194,8 @@ export async function backfillSocialTickers(
     for (const row of batch) {
       try {
         const matches = extractFromParts(catalog, row.body);
-        await saveCommentTickers(row.id, matches);
+        tally(result, row.tickerLinks.map((l) => l.ticker), matches.map((m) => m.symbol));
+        if (!dryRun) await saveCommentTickers(row.id, matches);
         result.associationsWritten += matches.length;
       } catch (err) {
         result.failures += 1;
@@ -167,6 +214,21 @@ export async function backfillSocialTickers(
   }
 
   return result;
+}
+
+/**
+ * Fold one content item's before/after into the run totals.
+ *
+ * A symbol that survives is neither added nor removed — only the difference is
+ * reported, so the numbers describe the CHANGE rather than the volume of work.
+ */
+function tally(result: BackfillResult, before: string[], after: string[]): void {
+  const had = new Set(before);
+  const has = new Set(after);
+  result.oldAssociations += had.size;
+  result.newAssociations += has.size;
+  for (const symbol of had) if (!has.has(symbol)) result.associationsRemoved += 1;
+  for (const symbol of has) if (!had.has(symbol)) result.associationsAdded += 1;
 }
 
 /** Debug-level only, as specified — ambiguity is noise in normal operation. */
@@ -200,8 +262,19 @@ function pageWhere(cursor: Date, cursorId: string | null): Prisma.SocialPostsWhe
  * and TypeScript reports that round trip as a circular inference unless the
  * batch's shape is fixed up front.
  */
-type PostBatchRow = { id: string; title: string | null; body: string | null; fetchedAt: Date };
-type CommentBatchRow = { id: string; body: string | null; fetchedAt: Date };
+type PostBatchRow = {
+  id: string;
+  title: string | null;
+  body: string | null;
+  fetchedAt: Date;
+  tickerLinks: { ticker: string }[];
+};
+type CommentBatchRow = {
+  id: string;
+  body: string | null;
+  fetchedAt: Date;
+  tickerLinks: { ticker: string }[];
+};
 
 /** CLI entry: `npm run social:backfill-tickers -- --since=2026-01-01 --limit=500`. */
 async function main(): Promise<void> {
@@ -219,10 +292,15 @@ async function main(): Promise<void> {
     throw new Error(`--limit must be a positive number, received "${limitRaw}"`);
   }
 
+  const batchRaw = arg("batch-size");
+  const batchSize = batchRaw ? Number(batchRaw) : undefined;
+
   const result = await backfillSocialTickers({
     ...(since ? { since } : {}),
     ...(limit ? { limit } : {}),
+    ...(batchSize ? { batchSize } : {}),
     debug: process.argv.includes("--debug"),
+    dryRun: process.argv.includes("--dry-run"),
   });
 
   console.log("[backfill-tickers] done:", result);

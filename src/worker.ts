@@ -21,6 +21,7 @@ import { recalculateArenaUserPerformance } from "./jobs/recalculateArenaUserPerf
 import { refreshEarningsCalendar } from "./jobs/refreshEarningsCalendar.job.js";
 import { refreshWsbPortfolio } from "./jobs/refreshWsbPortfolio.job.js";
 import { refreshWsbBanbets } from "./jobs/refreshWsbBanbets.job.js";
+import { refreshTickerCatalog } from "./jobs/refreshTickerCatalog.job.js";
 import { runRedditIngestion } from "./workers/redditWorker.js";
 import { buildArcticShiftWorker } from "./workers/reddit/startArcticShiftWorker.js";
 import type { ArcticShiftWorkerHandle } from "./workers/reddit/arcticShiftWorker.js";
@@ -256,6 +257,26 @@ export function startSchedulers(): void {
       initialDelayMs: 120_000,
     }),
   );
+
+  // Ticker catalog: one public text file a day. Scheduled through the same
+  // loop as everything else, so it inherits the overlap guard — a slow refresh
+  // is skipped rather than started twice — and writes a worker_runs row.
+  if (env.TICKER_CATALOG_ENABLED) {
+    loops.push(
+      startJobLoop({
+        name: "refreshTickerCatalog",
+        intervalSeconds: Math.round(env.TICKER_CATALOG_REFRESH_INTERVAL_MS / 1000),
+        run: refreshTickerCatalog,
+        // Last of the staggered starts: the catalog changes daily, so nothing
+        // is lost by letting the market and social jobs claim the pool first.
+        initialDelayMs: 30_000,
+      }),
+    );
+  } else {
+    console.log(
+      "[worker] ticker catalog refresh is disabled (set TICKER_CATALOG_ENABLED=true to schedule it).",
+    );
+  }
 
   // Arctic Shift: its own paced loop, NOT a job on an interval.
   //

@@ -1,0 +1,17 @@
+Symbol|Security Name|Market Category|Test Issue|Financial Status|Round Lot Size|ETF|NextShares
+QQQ|Invesco QQQ Trust, Series 1|Q|N|N|100|Y|N
+NVDA|NVIDIA Corporation - Common Stock|Q|N|N|100|N|N
+MSFT|Microsoft Corporation - Common Stock|Q|N|N|100|N|N
+AAPL|Apple Inc. - Common Stock|Q|N|N|100|N|N
+AMD|Advanced Micro Devices, Inc. - Common Stock|Q|N|N|100|N|N
+TSLA|Tesla, Inc. - Common Stock|Q|N|N|100|N|N
+RDDT|Reddit, Inc. - Class A Common Stock|Q|N|N|100|N|N
+GOOG|Alphabet Inc. - Class C Capital Stock|Q|N|N|100|N|N
+GOOGL|Alphabet Inc. - Class A Common Stock|Q|N|N|100|N|N
+ON|ON Semiconductor Corporation - Common Stock|Q|N|N|100|N|N
+ZXZZT|Nasdaq TEST Common Stock|G|Y|N|100|N|N
+ padded |Padded Symbol Inc. - Common Stock|Q|N|N|100|N|N
+NVDA|NVIDIA Corporation - Common Stock|Q|N|N|100|N|N
+|Missing Symbol Corp|Q|N|N|100|N|N
+NONAME||Q|N|N|100|N|N
+File Creation Time: 0807202621:31|||||||

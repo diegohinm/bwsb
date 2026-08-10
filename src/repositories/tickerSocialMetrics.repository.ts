@@ -74,8 +74,22 @@ export async function replaceBuckets(
   meta: { provider: string; source: string; isMock: boolean },
 ): Promise<number> {
   return prisma.$transaction(async (tx) => {
+    // Delete BY THE KEYS BEING WRITTEN, not by a time range.
+    //
+    // The range form assumed every incoming bucket started at or after
+    // `fromIso`, and an aggregation window that reaches slightly further back
+    // produced rows the delete had not cleared — so `createMany` hit the
+    // (ticker, bucket_size, bucket_start) unique constraint and the job failed
+    // on every single cycle. Clearing exactly what is about to be inserted
+    // makes the replace total regardless of where the buckets land.
+    const starts = [...new Set(rows.map((r) => r.bucketStart.getTime()))].map(
+      (ms) => new Date(ms),
+    );
     await tx.tickerSocialMetricSnapshots.deleteMany({
-      where: { bucketSize, bucketStart: { gte: new Date(fromIso) } },
+      where: {
+        bucketSize,
+        OR: [{ bucketStart: { gte: new Date(fromIso) } }, { bucketStart: { in: starts } }],
+      },
     });
     if (rows.length === 0) return 0;
 

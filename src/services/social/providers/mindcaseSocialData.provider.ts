@@ -1,5 +1,7 @@
 import { createHash } from "node:crypto";
 
+import { canonicalRedditUrl, normalizeFlair } from "../redditPermalink.js";
+
 import { env } from "../../../config/env.js";
 import { assertProviderCallsAllowed } from "../../../config/serviceRole.js";
 import { redditConfig } from "../../../config/reddit.config.js";
@@ -310,7 +312,16 @@ export class MindcaseSocialDataProvider implements SocialDataProvider {
     const isComment = "commentText" in r || "comment" in r;
     const title = str(r.title);
     const text = str(r.text) ?? str(r.commentText) ?? str(r.body) ?? str(r.selftext);
-    const url = str(r.postUrl) ?? str(r.url) ?? str(r.link);
+    // `redditUrl` is what this provider actually returns. The other three were
+    // guesses that never matched, which is why 1,522 of 1,527 stored posts had
+    // no permalink and the feed could not offer "Open on Reddit" at all.
+    const rawUrl =
+      str(r.redditUrl) ?? str(r.postUrl) ?? str(r.url) ?? str(r.link) ?? str(r.permalink);
+    const url = canonicalRedditUrl(rawUrl) ?? undefined;
+    // An article or image the post links OUT to. Kept apart from the thread's
+    // own permalink so the Reddit action can never point at a third-party page.
+    const externalLink = str(r.externalLink);
+    const redditId = str(r.redditId) ?? str(r.name);
     const media = r.media ?? r.image ?? r.thumbnail;
     const hasMedia =
       (Array.isArray(media) && media.length > 0) || typeof media === "string";
@@ -322,7 +333,8 @@ export class MindcaseSocialDataProvider implements SocialDataProvider {
 
     if (!title && !text) return null;
 
-    const flair = str(r.flair) ?? str(r.linkFlairText);
+    const flair =
+      normalizeFlair(str(r.flair) ?? str(r.linkFlairText) ?? str(r.link_flair_text)) ?? undefined;
     const cls = classifySocialItem({
       title,
       text,
@@ -354,6 +366,8 @@ export class MindcaseSocialDataProvider implements SocialDataProvider {
       confidence: cls.confidence,
       isScreenshot: cls.isScreenshot,
       ...(flair ? { flair } : {}),
+      ...(redditId ? { redditId } : {}),
+      ...(externalLink ? { externalLink } : {}),
     };
   }
 

@@ -209,6 +209,43 @@ const envSchema = z.object({
   /** WORKER: seconds between Reddit ingestion runs. */
   REDDIT_INGESTION_REFRESH_SECONDS: intEnv(900, 60, 86_400),
 
+  /**
+   * WORKER: whether the daily NYSE ticker-catalog refresh is scheduled.
+   *
+   * Defaults to TRUE: unlike the provider jobs this costs no quota — it is one
+   * public 500 KB text file per day — and a stale ticker catalog silently
+   * degrades every symbol-matching surface. The manual command runs regardless
+   * of this flag, so a maintainer can always force a refresh.
+   */
+  TICKER_CATALOG_ENABLED: boolFromString(true),
+  /** WORKER: Nasdaq-listed equities and ETFs. */
+  NASDAQ_LISTED_SOURCE_URL: z
+    .string()
+    .url()
+    .default("https://www.nasdaqtrader.com/dynamic/SymDir/nasdaqlisted.txt"),
+  /** WORKER: every other US venue — NYSE, NYSE American, NYSE Arca, Cboe BZX, IEX. */
+  OTHER_LISTED_SOURCE_URL: z
+    .string()
+    .url()
+    .default("https://www.nasdaqtrader.com/dynamic/SymDir/otherlisted.txt"),
+  /**
+   * WORKER: whether Cboe index symbols (SPX, VIX, RUT) are imported.
+   *
+   * Separately switchable because it is the one source outside Nasdaq Trader:
+   * if Cboe moves the endpoint, this can be turned off without stopping the
+   * equity refresh, and the existing index rows stay exactly as they are.
+   */
+  CBOE_INDEX_CATALOG_ENABLED: boolFromString(true),
+  /** WORKER: official Cboe US index definitions (JSON). */
+  CBOE_INDEX_CATALOG_SOURCE_URL: z
+    .string()
+    .url()
+    .default("https://cdn.cboe.com/api/global/us_indices/definitions/all_indices.json"),
+  /** WORKER: milliseconds between catalog refreshes. Once a day is plenty. */
+  TICKER_CATALOG_REFRESH_INTERVAL_MS: intEnv(86_400_000, 60_000, 7 * 86_400_000),
+  /** WORKER: how long to wait for the directory download before giving up. */
+  TICKER_CATALOG_REQUEST_TIMEOUT_MS: intEnv(30_000, 1_000, 300_000),
+
   /** WORKER: seconds between social ingestion runs (refreshSocialPulse). */
   SOCIAL_DATA_REFRESH_SECONDS: intEnv(600, 60, 86_400),
   /** WORKER: seconds between ticker-strip snapshot runs. */

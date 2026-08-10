@@ -93,6 +93,10 @@ export interface SocialPostItem {
    * it for every item, so the title patterns remain the fallback.
    */
   flair?: string;
+  /** Reddit's own fullname (`t3_1vi969l`), used to build comment permalinks. */
+  redditId?: string;
+  /** A link the post points OUT to. Never the thread's own permalink. */
+  externalLink?: string;
 }
 
 export type SentimentSplit = {

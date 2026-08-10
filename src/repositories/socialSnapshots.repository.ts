@@ -8,7 +8,10 @@ import {
   savePostTickers,
 } from "./tickerAssociations.repository.js";
 import { extractFromParts } from "../services/extraction/tickerExtraction.service.js";
-import { classifyPostCategory } from "../services/social/dailyDiscussion.service.js";
+import {
+  classifyPostCategory,
+  classifyThreadType,
+} from "../services/social/dailyDiscussion.service.js";
 import type {
   SocialContentType,
   SocialDataProviderName,
@@ -108,6 +111,8 @@ export async function saveSocialItems(
           sentiment: it.sentiment,
           stance: it.stance,
           confidence: it.confidence,
+          flairText: it.flair ?? null,
+          redditId: it.redditId ?? null,
           postedAt: it.createdAt,
         },
         // Only the volatile fields are refreshed — the identity and body of an
@@ -118,6 +123,11 @@ export async function saveSocialItems(
           sentiment: it.sentiment,
           stance: it.stance,
           confidence: it.confidence,
+          // Refreshed on every pass: a permalink or flair that was missing when
+          // the row was first seen must be filled in once the source supplies it.
+          url: it.url ?? undefined,
+          flairText: it.flair ?? undefined,
+          redditId: it.redditId ?? undefined,
           fetchedAt: new Date(),
         },
       });
@@ -146,6 +156,10 @@ export async function saveSocialItems(
           // Classified HERE, once, so the read path is an indexed filter
           // rather than a title match it cannot index.
           postCategory: classifyPostCategory(it.title, it.subreddit, it.flair),
+          // WHICH megathread, decided once here. Null for ordinary posts.
+          discussionThreadType: classifyThreadType(it.title, it.subreddit, it.flair),
+          flairText: it.flair ?? null,
+          redditId: it.redditId ?? null,
           postedAt: it.createdAt,
         },
         update: {
@@ -154,6 +168,10 @@ export async function saveSocialItems(
           // Re-evaluated on update too: a post edited into (or out of) the
           // daily format must not keep a stale category forever.
           postCategory: classifyPostCategory(it.title, it.subreddit, it.flair),
+          discussionThreadType: classifyThreadType(it.title, it.subreddit, it.flair),
+          url: it.url ?? undefined,
+          flairText: it.flair ?? undefined,
+          redditId: it.redditId ?? undefined,
           tickers: it.tickers,
           sentiment: it.sentiment,
           stance: it.stance,

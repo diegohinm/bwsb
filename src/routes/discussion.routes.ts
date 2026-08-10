@@ -8,6 +8,10 @@ import {
   MAX_FEED_LIMIT,
   isContentType,
   isDiscussionSort,
+  isSortDirection,
+  isSortField,
+  type SortDirection,
+  type SortField,
   isSentimentFilter,
   readDiscussion,
   readGlobalDiscussion,
@@ -17,6 +21,15 @@ import {
 } from "../services/discussion/discussionRead.service.js";
 import { discussionHub, GLOBAL_SCOPE } from "../realtime/discussionHub.js";
 import { discussionSource } from "../realtime/discussionSource.js";
+import {
+  DAILY_DISCUSSION_SUBREDDIT,
+  isDiscussionThreadType,
+  type DiscussionThreadType,
+} from "../services/social/dailyDiscussion.service.js";
+import {
+  isDiscussionRange,
+  readDiscussionSummary,
+} from "../services/discussion/discussionSummary.service.js";
 import type { DiscussionFrame } from "../realtime/discussionEvents.js";
 
 /**
@@ -122,6 +135,44 @@ function readContentType(raw: unknown): ContentType {
   return isContentType(canonical) ? canonical : "all";
 }
 
+/**
+ * Which recurring thread. `daily` | `tomorrow` | `weekend`, any casing.
+ * Anything unrecognized falls back to the everyday thread rather than 400-ing.
+ */
+function readDiscussionType(raw: unknown): DiscussionThreadType {
+  const value = firstString(raw)?.trim().toUpperCase();
+  return isDiscussionThreadType(value) ? value : "DAILY";
+}
+
+/**
+ * THE BUSINESS RULE, ENFORCED SERVER-SIDE.
+ *
+ * Daily Discussion exists only for r/wallstreetbets. A request that asks for it
+ * while naming other communities is not honoured half-way — the scope is
+ * replaced, not intersected, because intersecting would silently return an
+ * empty feed and look like "no data" rather than "invalid combination".
+ *
+ * The frontend forces the same thing, but the frontend is not trusted: this
+ * endpoint is public and can be called directly.
+ */
+function enforceDailyScope(
+  contentType: ContentType,
+  requested: string[] | undefined,
+): string[] | undefined {
+  if (contentType !== "daily_discussion") return requested;
+  return [DAILY_DISCUSSION_SUBREDDIT];
+}
+
+function readSortField(raw: unknown): SortField | undefined {
+  const value = firstString(raw);
+  return isSortField(value) ? value : undefined;
+}
+
+function readSortDirection(raw: unknown): SortDirection | undefined {
+  const value = firstString(raw)?.toLowerCase();
+  return isSortDirection(value) ? value : undefined;
+}
+
 function readSentiment(raw: unknown): SentimentFilter {
   const value = firstString(raw);
   return isSentimentFilter(value) ? value : "all";
@@ -143,14 +194,26 @@ discussionRouter.get(
     // An explicit `from` (custom range) wins over a `range` preset; when only a
     // preset is given it becomes the lower bound.
     const explicitFrom = readDate(req.query.from);
+    const contentType = readContentType(req.query.type);
     const { items, meta } = await readGlobalDiscussion({
-      subreddits: parseSubredditFilter(firstString(req.query.subreddits)),
-      contentType: readContentType(req.query.type),
+      // Daily Discussion is r/wallstreetbets only, and that is enforced HERE —
+      // a direct call naming other communities does not get a half-honoured
+      // scope.
+      subreddits: enforceDailyScope(
+        contentType,
+        parseSubredditFilter(firstString(req.query.subreddits)),
+      ),
+      contentType,
+      discussionType: readDiscussionType(req.query.discussionType),
       sentiment: readSentiment(req.query.sentiment),
       from: explicitFrom ?? readRangeFrom(req.query.range),
       to: readDate(req.query.to, true),
       search: firstString(req.query.q) ?? firstString(req.query.search),
       sort: readSort(req.query.sort),
+      // Whitelisted column + direction. Anything else falls back to
+      // newest-first rather than reaching the query builder.
+      sortField: readSortField(req.query.sort),
+      sortDirection: readSortDirection(req.query.direction),
       limit: readLimit(req.query.limit),
     });
 
@@ -166,6 +229,39 @@ discussionRouter.get(
         },
       },
     });
+  }),
+);
+
+/**
+ * GET /api/discussion/summary — aggregates for the CURRENTLY SELECTED range.
+ *
+ * ?range=1h|6h|24h|7d|30d|custom&from=&to=&subreddits=&type=&sentiment=&q=
+ *
+ * Takes the SAME filters as the feed so the two can never describe different
+ * datasets, and every figure is computed by Postgres over the whole window —
+ * not by counting the rows a page happened to fetch.
+ */
+discussionRouter.get(
+  "/discussion/summary",
+  asyncHandler(async (req, res) => {
+    const rawRange = firstString(req.query.range);
+    const range = isDiscussionRange(rawRange) ? rawRange : "24h";
+    const from = readDate(req.query.from);
+    const to = readDate(req.query.to, true);
+
+    const summary = await readDiscussionSummary({
+      // A custom range needs both ends; with only one it falls back to 24h
+      // rather than inventing the other.
+      range: range === "custom" && (!from || !to) ? "24h" : range,
+      ...(from ? { from } : {}),
+      ...(to ? { to } : {}),
+      subreddits: parseSubredditFilter(firstString(req.query.subreddits)),
+      contentType: readContentType(req.query.type),
+      sentiment: readSentiment(req.query.sentiment),
+      search: firstString(req.query.q) ?? firstString(req.query.search),
+    });
+
+    return res.json({ data: summary });
   }),
 );
 

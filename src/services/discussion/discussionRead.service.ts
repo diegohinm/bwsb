@@ -2,14 +2,21 @@ import type { Prisma } from "@prisma/client";
 
 import { prisma } from "../../lib/prisma.js";
 import {
+  canonicalCommentUrl,
+  canonicalRedditUrl,
+} from "../social/redditPermalink.js";
+import {
   badgesForComments,
   badgesForPosts,
   type TickerBadge,
 } from "../../repositories/tickerAssociations.repository.js";
 import { DISPLAY_THRESHOLD } from "../extraction/tickerExtraction.service.js";
+import { normalizeSearchQuery, searchTerms, type NormalizedSearch } from "./searchQuery.js";
+import { loadTickerCatalog } from "../../repositories/tickerAssociations.repository.js";
 import {
   DAILY_DISCUSSION_SUBREDDIT,
   DAILY_DISCUSSION_WINDOW_HOURS,
+  type DiscussionThreadType,
 } from "../social/dailyDiscussion.service.js";
 import {
   toAuthorHandle,
@@ -36,6 +43,26 @@ export type DiscussionSort = (typeof DISCUSSION_SORTS)[number];
 
 export function isDiscussionSort(value: unknown): value is DiscussionSort {
   return typeof value === "string" && (DISCUSSION_SORTS as readonly string[]).includes(value);
+}
+
+/**
+ * The sortable columns, as the table names them.
+ *
+ * A WHITELIST, not a passthrough: the value arrives from a query string and
+ * ends up naming a column, so anything outside this list is refused rather than
+ * interpolated.
+ */
+export const SORT_FIELDS = ["votes", "comments", "publishedAt"] as const;
+export type SortField = (typeof SORT_FIELDS)[number];
+
+export const SORT_DIRECTIONS = ["asc", "desc"] as const;
+export type SortDirection = (typeof SORT_DIRECTIONS)[number];
+
+export function isSortField(v: unknown): v is SortField {
+  return typeof v === "string" && (SORT_FIELDS as readonly string[]).includes(v);
+}
+export function isSortDirection(v: unknown): v is SortDirection {
+  return typeof v === "string" && (SORT_DIRECTIONS as readonly string[]).includes(v);
 }
 
 export const MAX_FEED_LIMIT = 200;
@@ -98,7 +125,30 @@ function tickerWhere(symbol: string, subreddits?: string[], since?: Date) {
  * Applied in SQL rather than after the fetch, so searching does not silently
  * search only the first page of results.
  */
-function postSearch(term: string): Prisma.SocialPostsWhereInput {
+function postSearch(search: NormalizedSearch): Prisma.SocialPostsWhereInput {
+  // Both spellings are matched: a post may have written "$UBER" or "UBER", and
+  // the reader means the same thing either way.
+  const clauses: Prisma.SocialPostsWhereInput[] = searchTerms(search).flatMap((term) => {
+    const contains = { contains: term, mode: "insensitive" as const };
+    return [
+      { title: contains },
+      { body: contains },
+      { subreddit: contains },
+      { authorHash: contains },
+    ];
+  });
+
+  // A cashtag the catalog recognizes also matches the stored ASSOCIATION, so
+  // "$UBER" finds a post that only ever wrote "Uber".
+  for (const symbol of search.tickerSymbols) {
+    clauses.push({ tickerLinks: { some: tickerLinkFilter(symbol) } });
+  }
+
+  return { OR: clauses };
+}
+
+/** Kept for the per-ticker feed, which searches a single plain term. */
+function postSearchTerm(term: string): Prisma.SocialPostsWhereInput {
   const contains = { contains: term, mode: "insensitive" as const };
   return {
     OR: [
@@ -115,7 +165,19 @@ function postSearch(term: string): Prisma.SocialPostsWhereInput {
   };
 }
 
-function commentSearch(term: string): Prisma.SocialCommentsWhereInput {
+function commentSearch(search: NormalizedSearch): Prisma.SocialCommentsWhereInput {
+  const clauses: Prisma.SocialCommentsWhereInput[] = searchTerms(search).flatMap((term) => {
+    const contains = { contains: term, mode: "insensitive" as const };
+    return [{ body: contains }, { subreddit: contains }, { authorHash: contains }];
+  });
+  for (const symbol of search.tickerSymbols) {
+    clauses.push({ tickerLinks: { some: tickerLinkFilter(symbol) } });
+  }
+  return { OR: clauses };
+}
+
+/** Kept for the per-ticker feed. */
+function commentSearchTerm(term: string): Prisma.SocialCommentsWhereInput {
   const contains = { contains: term, mode: "insensitive" as const };
   return {
     OR: [
@@ -149,6 +211,32 @@ function postOrder(sort: DiscussionSort): Prisma.SocialPostsOrderByWithRelationI
   if (sort === "upvotes") return [{ score: "desc" }, { postedAt: "desc" }];
   if (sort === "comments") return [{ commentCount: "desc" }, { postedAt: "desc" }];
   return [{ postedAt: "desc" }];
+}
+
+/**
+ * ORDER BY for a whitelisted column and direction.
+ *
+ * `postedAt` is always the tiebreaker so a page is stable when many rows share
+ * a vote or comment count — without it, two requests with identical filters
+ * could return the same rows in a different order.
+ */
+function postOrderBy(
+  field: SortField,
+  direction: SortDirection,
+): Prisma.SocialPostsOrderByWithRelationInput[] {
+  if (field === "votes") return [{ score: direction }, { postedAt: "desc" }];
+  if (field === "comments") return [{ commentCount: direction }, { postedAt: "desc" }];
+  return [{ postedAt: direction }];
+}
+
+function commentOrderBy(
+  field: SortField,
+  direction: SortDirection,
+): Prisma.SocialCommentsOrderByWithRelationInput[] {
+  // Comments carry no comment-count column, so sorting by "comments" falls back
+  // to recency rather than pretending to order by a figure that is not stored.
+  if (field === "votes") return [{ score: direction }, { postedAt: "desc" }];
+  return [{ postedAt: field === "publishedAt" ? direction : "desc" }];
 }
 
 type PostRow = Awaited<ReturnType<typeof prisma.socialPosts.findMany>>[number];
@@ -213,6 +301,9 @@ export function normalizePost(
     commentCount: row.commentCount,
     sentiment: toSentiment(row.stance),
     tickers,
+    flairText: row.flairText,
+    // Ready to use by the client, which never assembles a URL itself.
+    redditUrl: canonicalRedditUrl(resolvePermalink(row.url, row.body)),
     permalink: resolvePermalink(row.url, row.body),
     createdAt: (row.postedAt ?? row.fetchedAt).toISOString(),
   };
@@ -222,6 +313,7 @@ export function normalizeComment(
   row: CommentRow,
   symbol: string,
   tickers: TickerBadge[] = [],
+  parentUrl: string | null = null,
 ): DiscussionComment {
   return {
     id: row.externalId,
@@ -238,6 +330,14 @@ export function normalizeComment(
     replyCount: null,
     sentiment: toSentiment(row.stance),
     tickers,
+    flairText: row.flairText,
+    // The comment's own permalink when one was stored; otherwise the parent
+    // thread, which is the right page rather than a fabricated anchor.
+    redditUrl: canonicalCommentUrl(
+      resolvePermalink(row.url, row.body),
+      parentUrl,
+      row.redditId,
+    ),
     permalink: resolvePermalink(row.url, row.body),
     createdAt: (row.postedAt ?? row.fetchedAt).toISOString(),
   };
@@ -246,6 +346,11 @@ export function normalizeComment(
 export type GlobalDiscussionQuery = {
   subreddits?: string[];
   contentType?: ContentType;
+  /** Which recurring thread, when contentType is `daily_discussion`. */
+  discussionType?: DiscussionThreadType;
+  /** Sortable column, whitelisted. Defaults to newest-first. */
+  sortField?: SortField;
+  sortDirection?: SortDirection;
   sentiment?: SentimentFilter;
   /** Inclusive lower/upper bounds on `postedAt`. */
   from?: Date;
@@ -294,6 +399,11 @@ export type GlobalDiscussionResult = {
      * the window — the line is then omitted rather than invented.
      */
     sourceThread?: DailyDiscussionThread | null;
+    /**
+     * Which recurring thread the feed resolved. Present in daily mode even when
+     * no thread was found, so the client can name the missing one.
+     */
+    discussionType?: DiscussionThreadType;
   };
 };
 
@@ -312,12 +422,18 @@ export type GlobalDiscussionResult = {
  */
 export async function findLatestDailyDiscussionThread(
   now: Date = new Date(),
+  threadType: DiscussionThreadType = "DAILY",
 ): Promise<DailyDiscussionThread | null> {
-  const since = new Date(now.getTime() - DAILY_DISCUSSION_WINDOW_HOURS * 60 * 60 * 1000);
+  // WEEKEND threads live longer than the weekday window: one is posted on
+  // Friday evening and is still the active thread on Sunday night. Using the
+  // weekday window would make the weekend feed empty for most of the weekend.
+  const hours = threadType === "WEEKEND" ? 96 : DAILY_DISCUSSION_WINDOW_HOURS;
+  const since = new Date(now.getTime() - hours * 60 * 60 * 1000);
 
   const row = await prisma.socialPosts.findFirst({
     where: {
       postCategory: "DAILY_DISCUSSION",
+      discussionThreadType: threadType,
       subreddit: DAILY_DISCUSSION_SUBREDDIT,
       postedAt: { gte: since },
     },
@@ -360,7 +476,19 @@ export async function readGlobalDiscussion(
   // Resolved once for BOTH jobs: it scopes the feed in daily mode, and it is
   // always reported as `sourceThread` so the compact source line renders over
   // any filter. One indexed query either way.
-  const latestDaily = await findLatestDailyDiscussionThread();
+  const sortField: SortField = query.sortField ?? "publishedAt";
+  const sortDirection: SortDirection = query.sortDirection ?? "desc";
+
+  // The catalog decides which cashtags are real securities, so "$UBER" becomes
+  // a ticker search while "$100" stays literal text. Read once per request.
+  const catalog = term ? await loadTickerCatalog() : null;
+  const normalizedSearch: NormalizedSearch | null = term
+    ? normalizeSearchQuery(term, (symbol) => catalog!.bySymbol.has(symbol))
+    : null;
+
+  // WHICH recurring thread the reader asked for. Defaults to the everyday one.
+  const threadType: DiscussionThreadType = query.discussionType ?? "DAILY";
+  const latestDaily = await findLatestDailyDiscussionThread(new Date(), threadType);
   const dailyThread = dailyMode ? latestDaily : null;
 
   const base = {
@@ -395,7 +523,9 @@ export async function readGlobalDiscussion(
         contentType,
         sentiment,
         sort,
-        subreddits: null,
+        // Daily mode is scoped to one community whether or not a thread was
+        // found; saying null here would imply "all communities".
+        subreddits: [DAILY_DISCUSSION_SUBREDDIT],
         from: query.from?.toISOString() ?? null,
         to: query.to?.toISOString() ?? null,
         search: term ?? null,
@@ -405,6 +535,9 @@ export async function readGlobalDiscussion(
         isMock: false,
         latestAt: null,
         dailyDiscussion: null,
+        // Reported even when empty, so the client can say WHICH thread is
+        // missing instead of a bare "no results".
+        discussionType: threadType,
         sourceThread: latestDaily,
       },
     };
@@ -413,8 +546,10 @@ export async function readGlobalDiscussion(
   const [postRows, commentRows] = await Promise.all([
     wantPosts
       ? prisma.socialPosts.findMany({
-          where: term ? { AND: [base, postSearch(term)] } : base,
-          orderBy: postOrder(sort),
+          where: normalizedSearch ? { AND: [base, postSearch(normalizedSearch)] } : base,
+          // Sorting happens in the DATABASE, over the whole filtered set — not
+          // over the rows a page happened to fetch.
+          orderBy: postOrderBy(sortField, sortDirection),
           take: limit,
         })
       : Promise.resolve([]),
@@ -427,10 +562,11 @@ export async function readGlobalDiscussion(
             const scoped = dailyThread
               ? { AND: [base, { postExternalId: dailyThread.postId }] }
               : base;
-            return term ? { AND: [scoped, commentSearch(term)] } : scoped;
+            return normalizedSearch
+              ? { AND: [scoped, commentSearch(normalizedSearch)] }
+              : scoped;
           })(),
-          // Comments carry no comment-count; upvote sort still applies.
-          orderBy: sort === "upvotes" ? [{ score: "desc" }, { postedAt: "desc" }] : [{ postedAt: "desc" }],
+          orderBy: commentOrderBy(sortField, sortDirection),
           take: limit,
         })
       : Promise.resolve([]),
@@ -462,19 +598,21 @@ export async function readGlobalDiscussion(
 
   // Posts and comments are fetched separately, so the merged list is re-sorted
   // once here rather than trusting two independent orderings.
+  const dir = sortDirection === "asc" ? -1 : 1;
   items.sort((a, b) => {
-    if (sort === "upvotes") {
+    if (sortField === "votes") {
       const av = (a.kind === "post" ? a.upvotes : a.score) ?? -1;
       const bv = (b.kind === "post" ? b.upvotes : b.score) ?? -1;
-      if (av !== bv) return bv - av;
+      if (av !== bv) return (bv - av) * dir;
     }
-    if (sort === "comments") {
+    if (sortField === "comments") {
       const av = a.kind === "post" ? (a.commentCount ?? -1) : -1;
       const bv = b.kind === "post" ? (b.commentCount ?? -1) : -1;
-      if (av !== bv) return bv - av;
+      if (av !== bv) return (bv - av) * dir;
     }
-    return b.createdAt.localeCompare(a.createdAt);
+    return b.createdAt.localeCompare(a.createdAt) * dir;
   });
+
 
   const trimmed = items.slice(0, limit);
   const providers = [
@@ -503,7 +641,7 @@ export async function readGlobalDiscussion(
       providers,
       isMock: providers.length > 0 && providers.every((p) => p === "mock"),
       latestAt: instants.length > 0 ? instants[instants.length - 1] : null,
-      ...(dailyMode ? { dailyDiscussion: dailyThread } : {}),
+      ...(dailyMode ? { dailyDiscussion: dailyThread, discussionType: threadType } : {}),
       sourceThread: latestDaily,
     },
   };
@@ -519,12 +657,12 @@ export async function readDiscussion(query: DiscussionQuery): Promise<Discussion
 
   const [postRows, commentRows] = await Promise.all([
     prisma.socialPosts.findMany({
-      where: term ? { AND: [base, postSearch(term)] } : base,
+      where: term ? { AND: [base, postSearchTerm(term)] } : base,
       orderBy: postOrder(sort),
       take: limit,
     }),
     prisma.socialComments.findMany({
-      where: term ? { AND: [base, commentSearch(term)] } : base,
+      where: term ? { AND: [base, commentSearchTerm(term)] } : base,
       // Comments are always newest-first: the right column is a live ticker
       // tape, and re-ranking it by score would stop it being one.
       orderBy: [{ postedAt: "desc" }],

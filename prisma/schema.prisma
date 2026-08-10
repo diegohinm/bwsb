@@ -1041,62 +1041,77 @@ model SignalScores {
 
 /// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
 model SocialComments {
-  id             String                 @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  externalId     String                 @unique @map("external_id")
-  provider       String?
-  source         String?
-  subreddit      String?
-  postExternalId String?                @map("post_external_id")
-  body           String?
-  url            String?
-  authorHash     String?                @map("author_hash")
-  score          Int?
-  tickers        String[]
-  sentiment      String?
-  stance         String?
-  confidence     Decimal?               @db.Decimal
-  postedAt       DateTime?              @map("posted_at") @db.Timestamptz(6)
-  fetchedAt      DateTime               @default(now()) @map("fetched_at") @db.Timestamptz(6)
-  tickerLinks    SocialCommentTickers[]
+  id                   String                 @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  externalId           String                 @unique @map("external_id")
+  provider             String?
+  source               String?
+  subreddit            String?
+  postExternalId       String?                @map("post_external_id")
+  body                 String?
+  url                  String?
+  authorHash           String?                @map("author_hash")
+  score                Int?
+  tickers              String[]
+  sentiment            String?
+  stance               String?
+  confidence           Decimal?               @db.Decimal
+  postedAt             DateTime?              @map("posted_at") @db.Timestamptz(6)
+  fetchedAt            DateTime               @default(now()) @map("fetched_at") @db.Timestamptz(6)
+  /// INHERITED from the parent thread, so filtering by subtype needs no join.
+  discussionThreadType String?                @map("discussion_thread_type")
+  /// A comment has no link flair of its own; this carries the PARENT post's,
+  /// when known, and stays null otherwise rather than inventing one.
+  flairText            String?                @map("flair_text")
+  redditId             String?                @map("reddit_id")
+  tickerLinks          SocialCommentTickers[]
 
   @@index([subreddit, postedAt(sort: Desc)], map: "social_comments_subreddit_idx")
   @@index([postExternalId, postedAt(sort: Desc)], map: "social_comments_post_external_idx")
+  @@index([discussionThreadType, postedAt(sort: Desc)], map: "social_comments_thread_type_idx")
   @@index([tickers], map: "social_comments_tickers_gin", type: Gin)
   @@map("social_comments")
 }
 
 /// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
 model SocialPosts {
-  id           String              @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  externalId   String              @unique @map("external_id")
-  provider     String?
-  source       String?
-  subreddit    String?
-  type         String?
-  title        String?
-  body         String?
-  url          String?
-  authorHash   String?             @map("author_hash")
-  score        Int?
-  commentCount Int?                @map("comment_count")
-  tickers      String[]
-  sentiment    String?
-  stance       String?
-  confidence   Decimal?            @db.Decimal
-  isScreenshot Boolean             @default(false) @map("is_screenshot")
+  id                   String              @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  externalId           String              @unique @map("external_id")
+  provider             String?
+  source               String?
+  subreddit            String?
+  type                 String?
+  title                String?
+  body                 String?
+  url                  String?
+  authorHash           String?             @map("author_hash")
+  score                Int?
+  commentCount         Int?                @map("comment_count")
+  tickers              String[]
+  sentiment            String?
+  stance               String?
+  confidence           Decimal?            @db.Decimal
+  isScreenshot         Boolean             @default(false) @map("is_screenshot")
   /// "REGULAR" | "DAILY_DISCUSSION". Decided once, at ingestion, by
   /// services/social/dailyDiscussion.service.ts — never re-derived from the
   /// title at read time.
-  postCategory String              @default("REGULAR") @map("post_category")
-  postedAt     DateTime?           @map("posted_at") @db.Timestamptz(6)
-  fetchedAt    DateTime            @default(now()) @map("fetched_at") @db.Timestamptz(6)
+  postCategory         String              @default("REGULAR") @map("post_category")
+  /// Which recurring r/wallstreetbets thread this is: DAILY | TOMORROW |
+  /// WEEKEND. Null for everything else. Decided by the worker at ingestion.
+  discussionThreadType String?             @map("discussion_thread_type")
+  /// Subreddit link flair, when the source reports one. Null renders no badge.
+  flairText            String?             @map("flair_text")
+  /// Reddit's own fullname for the item (`t3_1vi969l`).
+  redditId             String?             @map("reddit_id")
+  postedAt             DateTime?           @map("posted_at") @db.Timestamptz(6)
+  fetchedAt            DateTime            @default(now()) @map("fetched_at") @db.Timestamptz(6)
   /// Normalized associations. `tickers` above stays as the GIN-indexed display
   /// projection of the rows here that clear the confidence threshold.
-  tickerLinks  SocialPostTickers[]
+  tickerLinks          SocialPostTickers[]
 
   @@index([postedAt(sort: Desc)], map: "social_posts_posted_idx")
   @@index([subreddit, postedAt(sort: Desc)], map: "social_posts_subreddit_idx")
   @@index([postCategory, subreddit, postedAt(sort: Desc)], map: "social_posts_daily_discussion_idx")
+  @@index([discussionThreadType, subreddit, postedAt(sort: Desc)], map: "social_posts_thread_type_idx")
   @@index([tickers], map: "social_posts_tickers_gin", type: Gin)
   @@map("social_posts")
 }
@@ -1300,7 +1315,24 @@ model Tickers {
   exchange                   String?
   isActive                   Boolean?                     @default(true) @map("is_active")
   isCommonWord               Boolean?                     @default(false) @map("is_common_word")
+  /// Catalog-level ambiguity, owned by the Nasdaq Trader refresh job and set
+  /// from config/tickers/ambiguousTickers.ts. Deliberately NOT the same column
+  /// as `isCommonWord`, which belongs to the Reddit extractor and is curated
+  /// from observed false positives — a daily import must not erase that.
+  isAmbiguous                Boolean                      @default(false) @map("is_ambiguous")
+  /// When this symbol last appeared in a fully validated import. NULL means it
+  /// has never been seen in one, which is not the same as "seen long ago".
+  lastSeenAt                 DateTime?                    @map("last_seen_at") @db.Timestamptz(6)
+  /// Left NULL by the importer: the source only carries the type inside the
+  /// security name as prose, and deriving one from that would be a guess.
+  securityType               String?                      @map("security_type")
+  /// Which directory last supplied this row —
+  /// NASDAQ_TRADER_NASDAQ_LISTED | NASDAQ_TRADER_OTHER_LISTED | CBOE_INDEX_DIRECTORY.
+  /// Deactivation sweeps are scoped by it: a source may only switch off symbols
+  /// from its own universe. NULL means no importer owns the row.
+  source                     String?
   createdAt                  DateTime                     @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt                  DateTime                     @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
   betaAdjustedResults        BetaAdjustedResults[]
   bets                       Bets[]
   ddQualityScores            DdQualityScores[]
@@ -1323,6 +1355,12 @@ model Tickers {
   virtualPositions           VirtualPositions[]
   virtualTrades              VirtualTrades[]
 
+  @@index([exchange, isActive], map: "tickers_exchange_active_idx")
+  @@index([source, isActive], map: "tickers_source_active_idx")
+  @@index([securityType], map: "tickers_security_type_idx")
+  @@index([companyName], map: "tickers_company_name_idx")
+  @@index([isAmbiguous], map: "tickers_is_ambiguous_idx")
+  @@index([lastSeenAt(sort: Desc)], map: "tickers_last_seen_idx")
   @@map("tickers")
 }
 

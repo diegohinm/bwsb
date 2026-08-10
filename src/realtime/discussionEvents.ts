@@ -57,6 +57,16 @@ export interface DiscussionPost {
   sentiment: DiscussionSentiment;
   /** Validated securities this post refers to. Empty when none was confident. */
   tickers: DiscussionTicker[];
+  /**
+   * Subreddit link flair, or null. Never a placeholder — the badge is omitted.
+   */
+  flairText: string | null;
+  /**
+   * Ready-to-use canonical Reddit URL, or null. The client never builds one:
+   * a URL assembled from a title is a guess, and a guess that 404s is worse
+   * than no link.
+   */
+  redditUrl: string | null;
   /** The original Reddit URL. Null when the source stored none. */
   permalink: string | null;
   createdAt: string;
@@ -75,6 +85,9 @@ export interface DiscussionComment {
   replyCount: number | null;
   sentiment: DiscussionSentiment;
   tickers: DiscussionTicker[];
+  flairText: string | null;
+  /** The comment's own permalink, or its parent thread as an honest fallback. */
+  redditUrl: string | null;
   permalink: string | null;
   createdAt: string;
 }

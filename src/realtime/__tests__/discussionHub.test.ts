@@ -38,6 +38,8 @@ function samplePost(ticker: string): DiscussionEvent {
       commentCount: 0,
       sentiment: "bullish",
       tickers: [],
+      flairText: null,
+      redditUrl: null,
       permalink: null,
       createdAt: new Date().toISOString(),
     },

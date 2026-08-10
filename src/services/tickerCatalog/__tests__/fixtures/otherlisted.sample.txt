@@ -1,0 +1,24 @@
+ACT Symbol|Security Name|Exchange|CQS Symbol|ETF|Round Lot Size|Test Issue|NASDAQ Symbol
+IBM|International Business Machines Corporation|N|IBM|N|100|N|IBM
+AI|C3.ai, Inc. Class A Common Stock|N|AI|N|100|N|AI
+IT|Gartner, Inc. Common Stock|N|IT|N|100|N|IT
+AA|Alcoa Corporation Common Stock |N|AA|N|100|N|AA
+AAC.U|Ares Acquisition Corporation Units|N|AAC.U|N|100|N|AAC.U
+ABR$D|Arbor Realty Trust Preferred Series D|N|ABR$D|N|100|N|ABR$D
+ ibm2 |Padded Symbol Corp|N|IBM2|N|100|N|IBM2
+IBM|International Business Machines Corporation|N|IBM|N|100|N|IBM
+TESTX|Test Security|N|TESTX|N|100|Y|TESTX
+CTEST.E|NYSE Test One Common Stock|N|CTEST.E|N|100|Y|CTEST.E
+SOMETHING|Other Exchange Security|P|SOMETHING|N|100|N|SOMETHING
+ARCAONE|NYSE Arca Listed|P|ARCAONE|Y|100|N|ARCAONE
+AMEXONE|NYSE American Listed|A|AMEXONE|N|100|N|AMEXONE
+IEXONE|IEX Listed|V|IEXONE|N|100|N|IEXONE
+|Missing Symbol Corp|N||N|100|N|
+NONAME||N|NONAME|N|100|N|NONAME
+SPY|SPDR S&P 500 ETF Trust|P|SPY|Y|100|N|SPY
+IWM|iShares Russell 2000 ETF|P|IWM|Y|100|N|IWM
+AMEXCO|NYSE American Listed Corp|A|AMEXCO|N|100|N|AMEXCO
+BATSCO|Cboe BZX Listed Corp|Z|BATSCO|N|100|N|BATSCO
+IEXCO|IEX Listed Corp|V|IEXCO|N|100|N|IEXCO
+NEWVENUE|Some New Venue Corp|M|NEWVENUE|N|100|N|NEWVENUE
+File Creation Time: 0807202621:31||||||
