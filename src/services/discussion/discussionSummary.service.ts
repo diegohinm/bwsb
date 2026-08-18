@@ -12,8 +12,12 @@ import { DISPLAY_THRESHOLD } from "../extraction/tickerExtraction.service.js";
  * discussions" was really "rows on this page" and the ticker ranking was drawn
  * from at most 60 items. Those numbers were wrong in a way that looked right.
  *
- * Every figure here comes from a `GROUP BY` over the whole window, and every
- * figure obeys the same filters as the feed beside it.
+ * Every figure here comes from a `GROUP BY` over the whole window.
+ *
+ * It is scoped by the WINDOW and the COMMUNITIES, and by nothing else. It once
+ * took the feed's search, content type and sentiment as well; see `filterSql`
+ * for why that made the card describe the visible page instead of the
+ * conversation.
  */
 
 export const DISCUSSION_RANGES = ["1h", "6h", "24h", "7d", "30d", "custom"] as const;
@@ -62,10 +66,13 @@ export type SummaryQuery = {
   /** Only for `range === "custom"`. Both required, `from < to`. */
   from?: Date;
   to?: Date;
+  /** Empty or absent means every tracked community. */
   subreddits?: string[];
-  contentType?: "all" | "post" | "comment" | "daily_discussion";
-  sentiment?: "all" | "bullish" | "neutral" | "bearish";
-  search?: string;
+  /**
+   * NO contentType / sentiment / search. The summary is an aggregate of the
+   * conversation in a window, not a description of the rows the feed happens
+   * to be showing. See `filterSql`.
+   */
   /** Injectable so the window is deterministic in tests. */
   now?: Date;
 };
@@ -182,14 +189,22 @@ export type DiscussionSummaryResult = {
   comparisonAvailable: boolean;
 };
 
-/** Filters shared with the feed, as SQL fragments over an aliased row. */
-function filterSql(
-  alias: string,
-  query: SummaryQuery,
-  from: Date,
-  to: Date,
-  isPost: boolean,
-): Prisma.Sql {
+/**
+ * THE ONLY TWO FILTERS THE SUMMARY HAS: the window, and the communities.
+ *
+ * It used to take the feed's search, content type and sentiment as well, which
+ * made the roll-up describe the visible page rather than the conversation. The
+ * damage was worst on sentiment: filtering the feed to Bearish made the
+ * breakdown report 100% bearish — a tautology dressed up as a measurement.
+ * Searching "CISCO" collapsed "Total Discussions" to the handful of matching
+ * rows. The two panels are meant to answer different questions, so they no
+ * longer share a filter set.
+ *
+ * They are gone from the shape entirely rather than merely left unset by the
+ * caller: an optional filter that nothing passes is one refactor away from
+ * being passed again.
+ */
+function filterSql(alias: string, query: SummaryQuery, from: Date, to: Date): Prisma.Sql {
   const parts: Prisma.Sql[] = [
     Prisma.sql`${Prisma.raw(alias)}.posted_at >= ${from} AND ${Prisma.raw(alias)}.posted_at <= ${to}`,
   ];
@@ -197,27 +212,8 @@ function filterSql(
   if (query.subreddits && query.subreddits.length > 0) {
     parts.push(Prisma.sql`${Prisma.raw(alias)}.subreddit IN (${Prisma.join(query.subreddits)})`);
   }
-  if (query.sentiment && query.sentiment !== "all") {
-    parts.push(Prisma.sql`${Prisma.raw(alias)}.stance = ${query.sentiment}`);
-  }
-  if (query.search && query.search.trim().length > 0) {
-    const term = `%${query.search.trim()}%`;
-    parts.push(
-      isPost
-        ? Prisma.sql`(${Prisma.raw(alias)}.title ILIKE ${term} OR ${Prisma.raw(alias)}.body ILIKE ${term} OR ${Prisma.raw(alias)}.subreddit ILIKE ${term})`
-        : Prisma.sql`(${Prisma.raw(alias)}.body ILIKE ${term} OR ${Prisma.raw(alias)}.subreddit ILIKE ${term})`,
-    );
-  }
   return Prisma.join(parts, " AND ");
 }
-
-const wantsPosts = (q: SummaryQuery) =>
-  q.contentType === undefined || q.contentType === "all" || q.contentType === "post";
-const wantsComments = (q: SummaryQuery) =>
-  q.contentType === undefined ||
-  q.contentType === "all" ||
-  q.contentType === "comment" ||
-  q.contentType === "daily_discussion";
 
 /** Ticker mention counts over a window, from the association tables. */
 async function mentionCounts(
@@ -228,21 +224,19 @@ async function mentionCounts(
   const threshold = new Prisma.Decimal(DISPLAY_THRESHOLD);
   const pieces: Prisma.Sql[] = [];
 
-  if (wantsPosts(query)) {
-    pieces.push(Prisma.sql`
+  // ALWAYS both halves. The content-type filter used to drop one of them, so
+  // "Comments" made the ticker ranking forget every post that mentioned a
+  // symbol. A mention is a mention wherever it was written.
+  pieces.push(Prisma.sql`
       SELECT l.ticker, p.stance
         FROM social_post_tickers l
         JOIN social_posts p ON p.id = l.social_post_id
-       WHERE l.confidence >= ${threshold} AND ${filterSql("p", query, from, to, true)}`);
-  }
-  if (wantsComments(query)) {
-    pieces.push(Prisma.sql`
+       WHERE l.confidence >= ${threshold} AND ${filterSql("p", query, from, to)}`);
+  pieces.push(Prisma.sql`
       SELECT l.ticker, c.stance
         FROM social_comment_tickers l
         JOIN social_comments c ON c.id = l.social_comment_id
-       WHERE l.confidence >= ${threshold} AND ${filterSql("c", query, from, to, false)}`);
-  }
-  if (pieces.length === 0) return new Map();
+       WHERE l.confidence >= ${threshold} AND ${filterSql("c", query, from, to)}`);
 
   const rows = await prisma.$queryRaw<
     { ticker: string; mentions: bigint; bullish: bigint; neutral: bigint; bearish: bigint }[]
@@ -277,18 +271,16 @@ async function totals(
   from: Date,
   to: Date,
 ): Promise<{ posts: number; comments: number; stance: Record<string, number> }> {
-  const pieces: Prisma.Sql[] = [];
-  if (wantsPosts(query)) {
-    pieces.push(Prisma.sql`
+  // Posts AND comments, always: the card reports both counts separately, so
+  // dropping one would leave a headline total that contradicts its own split.
+  const pieces: Prisma.Sql[] = [
+    Prisma.sql`
       SELECT 'post' AS kind, p.stance FROM social_posts p
-       WHERE ${filterSql("p", query, from, to, true)}`);
-  }
-  if (wantsComments(query)) {
-    pieces.push(Prisma.sql`
+       WHERE ${filterSql("p", query, from, to)}`,
+    Prisma.sql`
       SELECT 'comment' AS kind, c.stance FROM social_comments c
-       WHERE ${filterSql("c", query, from, to, false)}`);
-  }
-  if (pieces.length === 0) return { posts: 0, comments: 0, stance: {} };
+       WHERE ${filterSql("c", query, from, to)}`,
+  ];
 
   const rows = await prisma.$queryRaw<{ kind: string; stance: string | null; n: bigint }[]>(
     Prisma.sql`

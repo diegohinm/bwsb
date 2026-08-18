@@ -235,11 +235,18 @@ discussionRouter.get(
 /**
  * GET /api/discussion/summary — aggregates for the CURRENTLY SELECTED range.
  *
- * ?range=1h|6h|24h|7d|30d|custom&from=&to=&subreddits=&type=&sentiment=&q=
+ * ?range=1h|6h|24h|7d|30d|custom&from=&to=&subreddits=
  *
- * Takes the SAME filters as the feed so the two can never describe different
- * datasets, and every figure is computed by Postgres over the whole window —
- * not by counting the rows a page happened to fetch.
+ * WINDOW AND COMMUNITIES ONLY. It used to take the feed's `type`, `sentiment`
+ * and `q` too, which made the roll-up describe the rows on screen rather than
+ * the conversation: filtering the feed to Bearish reported a 100% bearish
+ * breakdown, and searching a symbol collapsed "Total Discussions" to the
+ * matching handful. Those parameters are ignored now — they are not in
+ * `SummaryQuery` at all — so a stale link carrying them still returns the
+ * honest aggregate.
+ *
+ * Every figure is computed by Postgres over the whole window, not by counting
+ * the rows a page happened to fetch.
  */
 discussionRouter.get(
   "/discussion/summary",
@@ -256,9 +263,6 @@ discussionRouter.get(
       ...(from ? { from } : {}),
       ...(to ? { to } : {}),
       subreddits: parseSubredditFilter(firstString(req.query.subreddits)),
-      contentType: readContentType(req.query.type),
-      sentiment: readSentiment(req.query.sentiment),
-      search: firstString(req.query.q) ?? firstString(req.query.search),
     });
 
     return res.json({ data: summary });
