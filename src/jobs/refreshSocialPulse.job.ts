@@ -1,90 +1,80 @@
-import { env } from "../config/env.js";
 import { WORKER_PULSE_TIMEFRAMES } from "../config/ingestion.js";
 import { isMainModule, runJobAsScript, type JobMetadata } from "../lib/jobRunner.js";
 import {
+  readSocialItems,
   savePulseSnapshot,
-  saveSocialItems,
 } from "../repositories/socialSnapshots.repository.js";
 import { buildSubredditPulse } from "../services/social/pulseAggregator.service.js";
-import {
-  getSocialDataProvider,
-  mockSocialDataProvider,
-} from "../services/social/socialDataProvider.factory.js";
 import { redditConfig } from "../config/reddit.config.js";
-import type { SocialItemsResult } from "../services/social/socialData.provider.js";
 import type { PulseTimeframe } from "../services/social/socialData.types.js";
 
 /**
- * WORKER JOB — Reddit/social ingestion.
+ * WORKER JOB — subreddit pulse aggregation. DATABASE ONLY.
  *
- * Pulls normalized posts/comments from the configured social provider
- * (Mindcase), stores them in `social_posts` / `social_comments`, then computes
- * and stores per-subreddit pulse metrics in `subreddit_pulse_snapshots` for
- * every timeframe. The API reads those tables — it never calls Mindcase.
+ * WHAT THIS USED TO BE, AND WHY IT CHANGED. This job WAS the ingestion path: it
+ * swept every entry in `REDDIT_SUBREDDITS` through Mindcase, stored the items,
+ * then aggregated them. With five communities configured and 50 rows requested
+ * each, every run bought 250 billable rows — and it ran every ten minutes. That
+ * is ~36,000 rows/day, roughly $180/day at $0.005 a row, for content of which
+ * only wallstreetbets was ever displayed.
  *
- * Rate-limit safety lives in the provider itself (bounded concurrency, spaced
- * job polling, Retry-After aware 429 backoff — see
- * services/social/providers/mindcaseSocialData.provider.ts). This job adds the
- * ingestion-level guarantees:
- *   - one subreddit failing never fails the run; partial results are saved;
- *   - a run that returned nothing at all is logged as an error and leaves the
- *     previous snapshots untouched, so the API keeps serving last-known-good.
+ * It was also the source of the "5 runs × 50 rows" pattern in the run history:
+ * five subreddits, one agent job each, one cycle.
+ *
+ * FETCHING NOW BELONGS TO jobs/syncRedditPosts + jobs/syncRedditComments, which
+ * are incremental, WSB-only, market-aware and budget-guarded. What remains here
+ * is the part that was always free: turning stored rows into pulse snapshots.
+ *
+ * So this job now calls NO PROVIDER AT ALL. It can run as often as we like, it
+ * cannot fail because of a rate limit, and a Mindcase outage degrades it only in
+ * the sense that the newest rows are missing.
  */
 
-/** True when demo data is the intended state rather than a failure. */
-function demoModeActive(): boolean {
-  return env.SOCIAL_DATA_PROVIDER === "mock" || (env.SOCIAL_DATA_PROVIDER as string) === "off";
-}
+/** How far back each pulse timeframe looks. The widest one sizes the read. */
+const TIMEFRAME_HOURS: Record<string, number> = { "1h": 1, "6h": 6, "24h": 24, "7d": 24 * 7 };
 
 export async function refreshSocialPulse(): Promise<JobMetadata> {
-  const provider = demoModeActive() ? mockSocialDataProvider : getSocialDataProvider();
-  // REDDIT_SUBREDDITS drives every provider, this one included.
+  // The communities to REPORT on: every tracked one, not just the ingested one.
+  // Aggregating stored rows costs nothing per community, so narrowing this would
+  // throw away history for no saving — the multi-community surfaces keep working
+  // on whatever has been collected, by this provider or by Arctic Shift.
   const subreddits = [...redditConfig.subreddits];
 
-  if (typeof provider.fetchItems !== "function") {
-    throw new Error(
-      `Social provider "${provider.name}" cannot expose raw items for ingestion.`,
-    );
+  // The widest timeframe decides how far back to read; the narrower ones are
+  // computed from the same rows rather than re-queried.
+  const lookbackHours = Math.max(
+    ...WORKER_PULSE_TIMEFRAMES.map((tf) => TIMEFRAME_HOURS[tf] ?? 24),
+  );
+  const sinceIso = new Date(Date.now() - lookbackHours * 3_600_000).toISOString();
+
+  const items = await readSocialItems({ sinceIso, subreddits, limit: 20_000 });
+
+  if (items.length === 0) {
+    // An empty window is not an outage now that nothing is fetched: it means
+    // the sync jobs have not stored anything recent. Previous snapshots stay.
+    return {
+      status: "success_without_change",
+      reason: "no stored social items in the pulse window",
+      subredditsAttempted: subreddits.length,
+    };
   }
 
-  let sweep: SocialItemsResult;
-  try {
-    sweep = await provider.fetchItems({ subreddits });
-  } catch (err) {
-    // A total provider failure (all subreddits rate-limited, misconfigured, …).
-    // Previous snapshots stay in place; the run is recorded as an error.
-    throw new Error(
-      `Social fetch failed for ${provider.name}: ${err instanceof Error ? err.message : String(err)}`,
-    );
-  }
-
-  if (sweep.items.length === 0) {
-    throw new Error(
-      `Social fetch returned no items (failed subreddits: ${sweep.failed.join(", ") || "none"}); previous snapshots kept.`,
-    );
-  }
-
-  // 1. Persist the raw normalized items (idempotent on the provider's own id).
-  const stored = await saveSocialItems(sweep.items);
-
-  // 2. Compute + store the aggregated pulse for every timeframe.
   const snapshotAt = new Date().toISOString();
-  const isMock = provider.name === "mock";
-  const warning =
-    sweep.failed.length > 0
-      ? `Partial data: ${sweep.failed.length} of ${sweep.attempted} subreddits unavailable${
-          sweep.rateLimited ? " (provider rate limit)" : ""
-        }.`
-      : null;
+  // Provenance comes from the rows themselves now. There is no sweep to have
+  // partially failed, so there is no partial-data warning to raise either — a
+  // community with nothing stored simply contributes nothing.
+  const providerName = items[0]?.provider ?? "mock";
+  const isMock = items.every((i) => i.provider === "mock");
+  const warning = null;
 
   const perTimeframe: Record<string, number> = {};
   for (const timeframe of WORKER_PULSE_TIMEFRAMES as readonly PulseTimeframe[]) {
-    const aggregate = buildSubredditPulse(sweep.items, timeframe);
+    const aggregate = buildSubredditPulse(items, timeframe);
     perTimeframe[timeframe] = await savePulseSnapshot(
       {
         timeframe,
-        provider: provider.name,
-        source: provider.name,
+        provider: providerName,
+        source: providerName,
         isMock,
         warning,
         subreddits: aggregate.subreddits,
@@ -94,14 +84,11 @@ export async function refreshSocialPulse(): Promise<JobMetadata> {
   }
 
   return {
-    provider: provider.name,
+    provider: providerName,
     snapshotAt,
-    itemsFetched: sweep.items.length,
-    postsStored: stored.posts,
-    commentsStored: stored.comments,
-    subredditsAttempted: sweep.attempted,
-    subredditsFailed: sweep.failed,
-    rateLimited: sweep.rateLimited,
+    // AGGREGATED, not fetched. Zero provider requests, zero cost.
+    itemsAggregated: items.length,
+    subredditsAttempted: subreddits.length,
     pulseRowsPerTimeframe: perTimeframe,
     isMock,
   };

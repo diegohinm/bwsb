@@ -13,6 +13,11 @@ import { closeSessionPool, sessionMiddleware } from "./lib/sessionStore.js";
 import { registerPrismaShutdown, registerProcessSafetyNet } from "./lib/prisma.js";
 import { optionalAuth } from "./middleware/optionalAuth.js";
 import { healthRouter } from "./routes/health.routes.js";
+import {
+  internalRuntimeConfigRouter,
+  runtimeConfigRouter,
+} from "./routes/runtimeConfig.routes.js";
+import { describeRedditCommunities } from "./config/redditCommunities.js";
 import { authRouter } from "./routes/auth.routes.js";
 import {
   redditVerificationRouter,
@@ -90,7 +95,11 @@ app.use(morgan("dev"));
 
 // Routes.
 app.use(healthRouter);
+// Root-mounted: the worker asks for /internal/runtime-config, authenticated by
+// the shared worker secret. Public config is mounted under /api below.
+app.use(internalRuntimeConfigRouter);
 app.use("/auth", authRouter);
+app.use("/api", runtimeConfigRouter);
 app.use("/api", tickersRouter);
 app.use("/api", trendsRouter);
 app.use("/api", signalsRouter);
@@ -150,6 +159,10 @@ const server = app.listen(env.PORT, "0.0.0.0", () => {
       `host 0.0.0.0, role=${SERVICE_ROLE}`,
   );
   console.log(`[API] CORS origin: ${env.FRONTEND_ORIGIN}`);
+  // THE SINGLE SOURCE OF TRUTH, stated at boot. Everything downstream — the
+  // worker's Mindcase scope and the frontend's community list — derives from
+  // this line, so it is the first thing to check when any of them disagree.
+  console.log(describeRedditCommunities());
   console.log(
     `Reddit OAuth: ${
       isRedditOAuthConfigured ? "configured" : "NOT configured (email auth only)"

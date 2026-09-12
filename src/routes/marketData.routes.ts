@@ -2,7 +2,6 @@ import { Router } from "express";
 
 import { ok, fail, asyncHandler } from "../lib/response.js";
 import {
-  getCandles,
   getOptionChain,
   getMarketProviderStatus,
   getMarketDataDiagnostics,
@@ -12,6 +11,7 @@ import {
   getStoredQuotes,
   getStoredMovers,
 } from "../services/market-data/marketRead.service.js";
+import { readCandles } from "../services/market-data/marketCandleRead.service.js";
 import { extendedHoursEnabled } from "../config/env.js";
 import {
   CANDLE_TIMEFRAMES,
@@ -120,9 +120,11 @@ marketDataRouter.get(
     const parsed = parseSession(firstString(req.query.session));
     if ("error" in parsed) return fail(res, parsed.error, 400);
 
+    // DATABASE, then the queue. This endpoint used to call the provider on the
+    // request thread; see services/market-data/marketCandleRead.service.ts.
     return ok(
       res,
-      await getCandles({
+      await readCandles({
         symbol: req.params.symbol,
         timeframe: tf,
         from,

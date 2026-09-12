@@ -1,3 +1,4 @@
+import { effectiveCommunitiesFromQuery } from "../config/redditCommunities.js";
 import { Router } from "express";
 
 import { ok, fail, asyncHandler } from "../lib/response.js";
@@ -15,7 +16,6 @@ import {
 import {
   getSeries as getMentionSentimentSeries,
   isMentionRange,
-  parseSubredditFilter,
   MENTION_RANGES,
 } from "../services/tickers/tickerMentionSentiment.service.js";
 import { mentionsRepository } from "../repositories/mentions.repository.js";
@@ -243,7 +243,7 @@ tickersRouter.get(
   "/tickers/:ticker/reddit-mention-sentiment",
   asyncHandler(async (req, res) => {
     const range = isMentionRange(req.query.range) ? req.query.range : "24h";
-    const subreddits = parseSubredditFilter(req.query.subreddits);
+    const subreddits = effectiveCommunitiesFromQuery(typeof req.query.subreddits === "string" ? req.query.subreddits : null);
     const data = await getMentionSentimentSeries({
       ticker: req.params.ticker.toUpperCase(),
       range,

@@ -60,6 +60,26 @@ describe("cashtags and plain symbols", () => {
     assert.deepEqual(shown("NVDA versus AMD for the next quarter."), ["NVDA", "AMD"]);
   });
 
+  it("does not read a dollar AMOUNT as a cashtag", () => {
+    // "$" means "security" only in front of letters. Treating "$500" as a
+    // symbol would file every position-size post under a ticker that does not
+    // exist, and would do it on the single most common phrasing on the sub.
+    assert.deepEqual(shown("I spent $500 on calls"), []);
+    assert.deepEqual(shown("down $1200 today, up $80 yesterday"), []);
+  });
+
+  it("still reads the cashtag when a price is right next to it", () => {
+    assert.deepEqual(shown("$NVDA at $500 is a steal"), ["NVDA"]);
+  });
+
+  it("counts one symbol once however many times it is repeated", () => {
+    // What lands in ticker_activity is one mention per (item, ticker): three
+    // spellings of one opinion are one item talking about NVDA, and counting
+    // three would overstate the conversation by however much somebody repeated
+    // themselves. Enforced again by the association tables' primary key.
+    assert.deepEqual(shown("NVDA NVDA $NVDA"), ["NVDA"]);
+  });
+
   it("REJECTS a cashtag that is not a real security", () => {
     // The old extractor accepted any 1-5 letters after a `$`, which is how
     // DRAM, SPCX and BURU ended up stored as securities.

@@ -1,3 +1,4 @@
+import { effectiveCommunitiesFromQuery } from "../config/redditCommunities.js";
 import { Router } from "express";
 
 import { ok, fail, asyncHandler } from "../lib/response.js";
@@ -10,7 +11,6 @@ import {
   isPulseTimeframe,
   PULSE_TIMEFRAME_MS,
 } from "../services/social/socialData.types.js";
-import { parseSubredditFilter } from "../services/social/subreddits.js";
 
 export const betsRouter = Router();
 
@@ -29,7 +29,7 @@ betsRouter.get(
   asyncHandler(async (req, res) => {
     const q = req.query;
     const timeframe = str(q.timeframe);
-    const subreddits = parseSubredditFilter(str(q.subreddits));
+    const subreddits = effectiveCommunitiesFromQuery(str(q.subreddits));
 
     const filters: BetFilters = {
       ticker: str(q.ticker),

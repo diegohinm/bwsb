@@ -1,5 +1,6 @@
 import { extendedHoursEnabled } from "../../config/env.js";
 import type { MarketSession } from "./marketData.types.js";
+import { getUsMarketSessionStatus } from "../market/usMarketCalendar.js";
 
 /**
  * Shared market-data helpers: US market session detection and a deterministic
@@ -39,16 +40,21 @@ function easternClock(now: Date): { day: number; minutes: number } {
 }
 
 /**
- * True when the instant falls inside the US REGULAR session:
- * 09:30–16:00 America/New_York on a weekday.
+ * True when the instant falls inside the US REGULAR session.
  *
- * Weekday-only and holiday-unaware, exactly as before — a market holiday simply
- * produces no bars, and the "no data" path already handles that.
+ * DELEGATES to services/market/usMarketCalendar. This used to be a weekday +
+ * clock check that ignored holidays and early closes, which was tolerable while
+ * the only consumer was quote ingestion — a holiday produces no bars and the
+ * no-data path handled it.
+ *
+ * It stopped being tolerable when Reddit ingestion started using market hours to
+ * decide how often to PAY Mindcase: the old answer would have run the
+ * one-minute cadence through Thanksgiving, Good Friday and every half-day.
+ * Rather than leave two different answers in the codebase, this became a
+ * forwarder to the one that is right.
  */
 export function isRegularSession(now: Date = new Date()): boolean {
-  const { day, minutes } = easternClock(now);
-  if (day === 0 || day === 6) return false;
-  return minutes >= REGULAR_OPEN && minutes < REGULAR_CLOSE;
+  return getUsMarketSessionStatus(now).isRegularSessionOpen;
 }
 
 /**
@@ -64,6 +70,9 @@ export function isRegularSession(now: Date = new Date()): boolean {
 export function extendedSession(now: Date = new Date()): MarketSession {
   const { day, minutes } = easternClock(now);
   if (day === 0 || day === 6) return "closed";
+  // A holiday has no premarket or after-hours either — the exchange is shut,
+  // not merely outside its regular hours.
+  if (!getUsMarketSessionStatus(now).isMarketDay) return "closed";
 
   if (minutes >= PREMARKET_OPEN && minutes < REGULAR_OPEN) return "premarket";
   if (minutes >= REGULAR_OPEN && minutes < REGULAR_CLOSE) return "regular";

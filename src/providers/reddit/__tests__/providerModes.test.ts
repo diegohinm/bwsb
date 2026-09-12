@@ -9,12 +9,24 @@ import {
 } from "./helpers.js";
 
 import assert from "node:assert/strict";
-import { describe, it } from "node:test";
+import { describe, it, beforeEach } from "node:test";
 
 import { FallbackRedditProvider } from "../FallbackRedditProvider.js";
 import { HybridRedditProvider } from "../HybridRedditProvider.js";
 import { AllRedditProvidersFailedError } from "../providerErrors.js";
 import { createRedditDataProvider } from "../RedditProviderFactory.js";
+
+import { __setRuntimeConfigForTests } from "../../../services/reddit/redditRuntimeConfig.js";
+
+/**
+ * The Mindcase clients now refuse to run without a verified community scope
+ * (see services/reddit/redditRuntimeConfig). These tests exercise the WIRE
+ * CONTRACT, not the guard, so they install the scope the production worker
+ * would have fetched from the backend. The guard itself is covered in
+ * services/reddit/__tests__/redditRuntimeConfig.test.ts.
+ */
+beforeEach(() => __setRuntimeConfigForTests(["wallstreetbets"]));
+
 
 /**
  * The behaviour the whole feature exists for: REDDIT_DATA_MODE decides which

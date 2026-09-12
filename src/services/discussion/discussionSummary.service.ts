@@ -1,7 +1,10 @@
 import { Prisma } from "@prisma/client";
 
 import { prisma } from "../../lib/prisma.js";
+import { env } from "../../config/env.js";
+import { increment } from "../../lib/metrics.js";
 import { DISPLAY_THRESHOLD } from "../extraction/tickerExtraction.service.js";
+import { BUCKET_MINUTES, bucketStartFor } from "../social/tickerActivity.service.js";
 
 /**
  * The Discussion summary — totals, sentiment split and ticker rankings for the
@@ -52,13 +55,28 @@ export const TOP_TICKER_LIMIT = 30;
  * Scaled by window length, because "five mentions" means something very
  * different in an hour than in a month. Without a floor, hotness degenerates
  * into a list of symbols that went from one mention to four.
+ *
+ * THE SHAPE IS FIXED; THE HEIGHT IS CONFIGURABLE. `HOT_TICKERS_MIN_MENTIONS`
+ * sets the 24-hour floor and every other window is a fixed ratio of it, so
+ * tuning one number moves the whole curve and cannot accidentally make an hour
+ * stricter than a week. At the default of 5 this reproduces the hand-picked
+ * 2/3/5/10/20 exactly — the knob was added without changing the behaviour it
+ * describes.
  */
+const FLOOR_RATIOS: readonly { maxHours: number; ratio: number }[] = [
+  { maxHours: 1, ratio: 2 / 5 },
+  { maxHours: 6, ratio: 3 / 5 },
+  { maxHours: 24, ratio: 1 },
+  { maxHours: 24 * 7, ratio: 2 },
+  { maxHours: Infinity, ratio: 4 },
+];
+
 export function minimumHotMentions(hours: number): number {
-  if (hours <= 1) return 2;
-  if (hours <= 6) return 3;
-  if (hours <= 24) return 5;
-  if (hours <= 24 * 7) return 10;
-  return 20;
+  const base = env.HOT_TICKERS_MIN_MENTIONS;
+  const { ratio } = FLOOR_RATIOS.find((r) => hours <= r.maxHours) ?? FLOOR_RATIOS.at(-1)!;
+  // A base of 0 means "no floor at all", which stays 0 rather than rounding up
+  // to 1 — an explicitly disabled guard must actually be disabled.
+  return base === 0 ? 0 : Math.max(1, Math.round(base * ratio));
 }
 
 export type SummaryQuery = {
@@ -215,12 +233,90 @@ function filterSql(alias: string, query: SummaryQuery, from: Date, to: Date): Pr
   return Prisma.join(parts, " AND ");
 }
 
-/** Ticker mention counts over a window, from the association tables. */
+export type MentionCounts = Map<
+  string,
+  { mentions: number; bullish: number; neutral: number; bearish: number }
+>;
+
+/**
+ * Ticker mention counts over a window — from `ticker_activity` when it can be,
+ * from the association tables when it cannot.
+ *
+ * The aggregated path is the point of the whole exercise: a 24h ranking becomes
+ * a sum over 5-minute buckets instead of a join across every association ever
+ * stored, and its cost tracks the window asked about rather than the size of
+ * the corpus.
+ *
+ * IT IS NOT USED FOR CUSTOM RANGES. A custom window is an arbitrary duration,
+ * and summing whole buckets over one would silently answer a slightly different
+ * question than the one on screen — worse, a DIFFERENT slightly-different
+ * question for the current window than for the comparison window, which is
+ * exactly where growth percentages come from. Raw scan there; the range is
+ * operator-chosen and rare.
+ *
+ * The flag exists for the backfill window: until history has been aggregated,
+ * buckets are missing for the older half of every window, and a ranking drawn
+ * from them would look authoritative while being wrong.
+ */
 async function mentionCounts(
   query: SummaryQuery,
   from: Date,
   to: Date,
-): Promise<Map<string, { mentions: number; bullish: number; neutral: number; bearish: number }>> {
+): Promise<MentionCounts> {
+  if (env.DISCUSSION_USE_AGGREGATIONS && query.range !== "custom") {
+    increment("discussion_summary_from_aggregations");
+    return aggregatedMentionCounts(query, from, to);
+  }
+  increment("discussion_summary_from_raw_scan");
+  return scannedMentionCounts(query, from, to);
+}
+
+/** The pre-aggregated path. Reads `ticker_activity` and nothing else. */
+async function aggregatedMentionCounts(
+  query: SummaryQuery,
+  from: Date,
+  to: Date,
+): Promise<MentionCounts> {
+  const parts: Prisma.Sql[] = [
+    Prisma.sql`bucket_minutes = ${BUCKET_MINUTES}`,
+    Prisma.sql`bucket_start >= ${from} AND bucket_start < ${to}`,
+  ];
+  if (query.subreddits && query.subreddits.length > 0) {
+    parts.push(Prisma.sql`subreddit IN (${Prisma.join(query.subreddits)})`);
+  }
+
+  const rows = await prisma.$queryRaw<
+    { ticker: string; mentions: bigint; bullish: bigint; neutral: bigint; bearish: bigint }[]
+  >(Prisma.sql`
+      SELECT ticker,
+             sum(mentions)::bigint AS mentions,
+             sum(bullish)::bigint  AS bullish,
+             sum(neutral)::bigint  AS neutral,
+             sum(bearish)::bigint  AS bearish
+        FROM ticker_activity
+       WHERE ${Prisma.join(parts, " AND ")}
+       GROUP BY ticker
+      HAVING sum(mentions) > 0`);
+
+  return new Map(
+    rows.map((r) => [
+      r.ticker,
+      {
+        mentions: Number(r.mentions),
+        bullish: Number(r.bullish),
+        neutral: Number(r.neutral),
+        bearish: Number(r.bearish),
+      },
+    ]),
+  );
+}
+
+/** The original path: count the associations themselves. */
+async function scannedMentionCounts(
+  query: SummaryQuery,
+  from: Date,
+  to: Date,
+): Promise<MentionCounts> {
   const threshold = new Prisma.Decimal(DISPLAY_THRESHOLD);
   const pieces: Prisma.Sql[] = [];
 
@@ -368,17 +464,74 @@ export function computeHotTickers(
 /** Upper bound on the growth multiplier. See computeHotTickers. */
 export const GROWTH_FACTOR_CAP = 10;
 
+/** Whether this query may be answered from buckets. See mentionCounts. */
+function useAggregations(query: SummaryQuery): boolean {
+  return env.DISCUSSION_USE_AGGREGATIONS && query.range !== "custom";
+}
+
+export type MentionWindows = {
+  currentFrom: Date;
+  currentTo: Date;
+  previousFrom: Date;
+  previousTo: Date;
+};
+
+/**
+ * The two windows MENTIONS are counted over.
+ *
+ * On the raw path these are simply the resolved window and its predecessor. On
+ * the bucket path they are snapped to bucket boundaries, and the reason is
+ * growth: hotness divides one window's count by another's, so the two must
+ * cover the same NUMBER OF BUCKETS. Left unaligned, a 1h window starting at
+ * 15:07 would take a partial bucket at each end while its predecessor took a
+ * different pair of partials, and the ratio would carry that difference as if
+ * it were a change in attention.
+ *
+ * The anchor is the END of the bucket in progress, so "the last hour" still
+ * includes what was said a minute ago. That newest bucket is by definition
+ * incomplete, which understates the current window slightly — a bias toward
+ * calling a real surge late rather than calling a non-surge early, which is the
+ * right direction for a list whose whole claim is that something is happening.
+ */
+export function mentionWindows(window: ResolvedWindow, aligned: boolean): MentionWindows {
+  if (!aligned) {
+    return {
+      currentFrom: window.from,
+      currentTo: window.to,
+      previousFrom: window.previousFrom,
+      previousTo: window.previousTo,
+    };
+  }
+
+  const durationMs = Math.max(1, window.to.getTime() - window.from.getTime());
+  const anchor = bucketStartFor(window.to).getTime() + BUCKET_MINUTES * 60_000;
+
+  return {
+    currentFrom: new Date(anchor - durationMs),
+    currentTo: new Date(anchor),
+    previousFrom: new Date(anchor - durationMs * 2),
+    previousTo: new Date(anchor - durationMs),
+  };
+}
+
 const round2 = (n: number) => Math.round(n * 100) / 100;
 
 export async function readDiscussionSummary(
   query: SummaryQuery,
 ): Promise<DiscussionSummaryResult> {
+  increment("discussion_summary_queries");
   const window = resolveWindow(query);
 
+  const buckets = mentionWindows(window, useAggregations(query));
+
   const [currentTotals, currentMentions, previousMentions] = await Promise.all([
+    // Totals keep the EXACT window: they are a headline count of the
+    // conversation, read straight from an indexed range on posted_at, and
+    // rounding them to a bucket edge would make a live feed show new rows while
+    // the number above it stayed put.
     totals(query, window.from, window.to),
-    mentionCounts(query, window.from, window.to),
-    mentionCounts(query, window.previousFrom, window.previousTo),
+    mentionCounts(query, buckets.currentFrom, buckets.currentTo),
+    mentionCounts(query, buckets.previousFrom, buckets.previousTo),
   ]);
 
   const totalDiscussions = currentTotals.posts + currentTotals.comments;

@@ -1,6 +1,7 @@
 import type { Prisma } from "@prisma/client";
 
 import { prisma } from "../../lib/prisma.js";
+import { increment } from "../../lib/metrics.js";
 import {
   canonicalCommentUrl,
   canonicalRedditUrl,
@@ -462,6 +463,9 @@ export async function findLatestDailyDiscussionThread(
 export async function readGlobalDiscussion(
   query: GlobalDiscussionQuery = {},
 ): Promise<GlobalDiscussionResult> {
+  // Counted so "Discussion costs no provider request" is a number, not a claim:
+  // compare this against databento_requests on /health/metrics.
+  increment("discussion_queries");
   const contentType: ContentType = query.contentType ?? "all";
   const sentiment: SentimentFilter = query.sentiment ?? "all";
   const sort: DiscussionSort = query.sort ?? "newest";
@@ -649,6 +653,9 @@ export async function readGlobalDiscussion(
 
 /** The initial feed for one ticker. Public — no session required. */
 export async function readDiscussion(query: DiscussionQuery): Promise<DiscussionSnapshot> {
+  // Counted so "Discussion costs no provider request" is a number, not a claim:
+  // compare this against databento_requests on /health/metrics.
+  increment("discussion_queries");
   const symbol = query.symbol.toUpperCase();
   const sort: DiscussionSort = query.sort ?? "newest";
   const limit = Math.min(MAX_FEED_LIMIT, Math.max(1, query.limit ?? DEFAULT_FEED_LIMIT));

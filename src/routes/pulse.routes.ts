@@ -1,3 +1,4 @@
+import { effectiveCommunitiesFromQuery } from "../config/redditCommunities.js";
 import { Router } from "express";
 
 import { ok, fail, asyncHandler } from "../lib/response.js";
@@ -16,7 +17,6 @@ import type {
 } from "../services/social/index.js";
 import {
   TRACKED_SUBREDDITS,
-  parseSubredditFilter,
 } from "../services/social/subreddits.js";
 
 export const pulseRouter = Router();
@@ -62,7 +62,7 @@ pulseRouter.get(
       );
     }
     const q = firstString(req.query.q)?.trim() || undefined;
-    const subreddits = parseSubredditFilter(firstString(req.query.subreddits));
+    const subreddits = effectiveCommunitiesFromQuery(firstString(req.query.subreddits));
     const data = await getSubredditPulse({ timeframe: raw, q, subreddits });
     return ok(res, data);
   }),

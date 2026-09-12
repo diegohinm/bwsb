@@ -1,10 +1,10 @@
+import { effectiveCommunitiesFromQuery } from "../config/redditCommunities.js";
 import { Router } from "express";
 
 import { asyncHandler, fail } from "../lib/response.js";
 import { requireAuth } from "../middleware/requireAuth.js";
 import { prisma } from "../lib/prisma.js";
 import { catalogTicker } from "../config/tickerCatalog.js";
-import { parseSubredditFilter } from "../services/social/subreddits.js";
 import {
   DEFAULT_PREFERENCES,
   readPersonalCalendar,
@@ -106,7 +106,7 @@ calendarRouter.get(
       start,
       end,
       socialTimeframe: readSocialTimeframe(req.query.socialTimeframe),
-      subreddits: parseSubredditFilter(firstString(req.query.subreddits)),
+      subreddits: effectiveCommunitiesFromQuery(firstString(req.query.subreddits)),
       limitTickers: readLimitTickers(req.query.limitTickers),
       filters: { status: readStatus(req.query.status), timing: readTiming(req.query.timing) },
     });

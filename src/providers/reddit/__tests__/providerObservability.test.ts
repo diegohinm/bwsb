@@ -1,7 +1,7 @@
 import { stubFetch, testConfig, TEST_API_KEY } from "./helpers.js";
 
 import assert from "node:assert/strict";
-import { describe, it } from "node:test";
+import { describe, it, beforeEach } from "node:test";
 
 import { ArcticShiftProvider } from "../ArcticShiftProvider.js";
 import { FallbackRedditProvider } from "../FallbackRedditProvider.js";
@@ -13,6 +13,18 @@ import {
   requireInternalOrAdmin,
 } from "../../../middleware/requireInternalOrAdmin.js";
 import type { RedditDataConfig } from "../../../config/redditDataConfig.js";
+
+import { __setRuntimeConfigForTests } from "../../../services/reddit/redditRuntimeConfig.js";
+
+/**
+ * The Mindcase clients now refuse to run without a verified community scope
+ * (see services/reddit/redditRuntimeConfig). These tests exercise the WIRE
+ * CONTRACT, not the guard, so they install the scope the production worker
+ * would have fetched from the backend. The guard itself is covered in
+ * services/reddit/__tests__/redditRuntimeConfig.test.ts.
+ */
+beforeEach(() => __setRuntimeConfigForTests(["wallstreetbets"]));
+
 
 /**
  * PRODUCTION provider behaviour: the observer, hybrid de-duplication, the
@@ -154,13 +166,13 @@ describe("provider comparison stats", () => {
   it("records one entry per provider in hybrid mode", async () => {
     const fetchStub = stubFetch((url) => {
       if (url.includes("mindcase")) {
-        return { body: { data: [{ postId: "shared1", title: "NVDA", subreddit: "stocks" }] } };
+        return { body: { data: [{ postId: "shared1", title: "NVDA", subreddit: "wallstreetbets" }] } };
       }
       return {
         body: {
           data: [
-            { id: "shared1", title: "NVDA", subreddit: "stocks", created_utc: 1_785_000_000 },
-            { id: "other2", title: "MSFT", subreddit: "stocks", created_utc: 1_785_000_100 },
+            { id: "shared1", title: "NVDA", subreddit: "wallstreetbets", created_utc: 1_785_000_000 },
+            { id: "other2", title: "MSFT", subreddit: "wallstreetbets", created_utc: 1_785_000_100 },
           ],
         },
       };
@@ -174,7 +186,7 @@ describe("provider comparison stats", () => {
         deduplicate: true,
         observer,
       });
-      const posts = await provider.fetchPosts({ subreddit: "stocks", limit: 10 });
+      const posts = await provider.fetchPosts({ subreddit: "wallstreetbets", limit: 10 });
 
       assert.equal(calls.length, 2, "both providers should report");
       assert.deepEqual(calls.map((c) => c.provider).sort(), ["arctic_shift", "mindcase"]);
@@ -202,7 +214,7 @@ describe("provider comparison stats", () => {
         preferredSource: "arctic_shift",
         observer,
       });
-      await provider.fetchPosts({ subreddit: "stocks", limit: 5 });
+      await provider.fetchPosts({ subreddit: "wallstreetbets", limit: 5 });
 
       const failed = calls.find((c) => !c.success);
       assert.ok(failed, "the rate-limited provider should be recorded as failed");
@@ -221,7 +233,7 @@ describe("provider comparison stats", () => {
 
   it("does not call the secondary in fallback mode when the primary answers", async () => {
     const fetchStub = stubFetch(() => ({
-      body: { data: [{ id: "a1", title: "T", subreddit: "stocks", created_utc: 1_785_000_000 }] },
+      body: { data: [{ id: "a1", title: "T", subreddit: "wallstreetbets", created_utc: 1_785_000_000 }] },
     }));
 
     try {
@@ -232,7 +244,7 @@ describe("provider comparison stats", () => {
       });
       const { observer, calls } = createObserverCollector();
       const provider = new FallbackRedditProvider(arctic(config), mindcase(config), { observer });
-      await provider.fetchPosts({ subreddit: "stocks", limit: 5 });
+      await provider.fetchPosts({ subreddit: "wallstreetbets", limit: 5 });
 
       assert.equal(calls.length, 1);
       assert.equal(calls[0]?.provider, "arctic_shift");

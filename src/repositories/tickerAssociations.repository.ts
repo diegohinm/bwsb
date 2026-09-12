@@ -96,9 +96,18 @@ function toRows(matches: TickerMatch[]): Row[] {
 export async function savePostTickers(
   socialPostId: string,
   matches: TickerMatch[],
-): Promise<void> {
+): Promise<SaveAssociationsResult> {
   const rows = toRows(matches);
   const symbols = displaySymbols(matches);
+
+  // Read before the replace, so the caller can tell a FIRST association from a
+  // re-write of one that already existed. The worker re-upserts every post on
+  // each poll to refresh its score, which lands here every time; without this
+  // distinction the aggregation would count the same mention once per poll.
+  const before = await prisma.socialPostTickers.findMany({
+    where: { socialPostId },
+    select: { ticker: true },
+  });
 
   await prisma.$transaction([
     prisma.socialPostTickers.deleteMany({ where: { socialPostId } }),
@@ -112,15 +121,22 @@ export async function savePostTickers(
       : []),
     prisma.socialPosts.update({ where: { id: socialPostId }, data: { tickers: symbols } }),
   ]);
+
+  return { symbols, newSymbols: newlyAssociated(before, symbols) };
 }
 
 /** The comment-side equivalent. */
 export async function saveCommentTickers(
   socialCommentId: string,
   matches: TickerMatch[],
-): Promise<void> {
+): Promise<SaveAssociationsResult> {
   const rows = toRows(matches);
   const symbols = displaySymbols(matches);
+
+  const before = await prisma.socialCommentTickers.findMany({
+    where: { socialCommentId },
+    select: { ticker: true },
+  });
 
   await prisma.$transaction([
     prisma.socialCommentTickers.deleteMany({ where: { socialCommentId } }),
@@ -137,6 +153,26 @@ export async function saveCommentTickers(
       data: { tickers: symbols },
     }),
   ]);
+
+  return { symbols, newSymbols: newlyAssociated(before, symbols) };
+}
+
+export type SaveAssociationsResult = {
+  /** Every symbol now displayed for this item. */
+  symbols: string[];
+  /**
+   * The subset associated with this item for the FIRST time.
+   *
+   * This is what pre-aggregation counts: one mention per (item, ticker), no
+   * matter how many times the item is re-ingested or how many times the symbol
+   * appears in the text. See services/social/tickerActivity.service.ts.
+   */
+  newSymbols: string[];
+};
+
+function newlyAssociated(before: { ticker: string }[], now: string[]): string[] {
+  const had = new Set(before.map((r) => r.ticker));
+  return now.filter((s) => !had.has(s));
 }
 
 export type TickerBadge = {

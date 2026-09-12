@@ -12,8 +12,16 @@ import { prisma, registerPrismaShutdown, registerProcessSafetyNet } from "./lib/
 import { withDbRetry } from "./lib/dbRetry.js";
 import { setTickerAllowlist } from "./services/social/tickerExtractor.service.js";
 import { refreshMarketQuotes } from "./jobs/refreshMarketQuotes.job.js";
+import { enqueueMarketDataWork } from "./jobs/enqueueMarketDataJobs.job.js";
+import { runMarketDataQueue } from "./workers/market/databentoWorker.js";
 import { refreshMarketMovers } from "./jobs/refreshMarketMovers.job.js";
 import { refreshSocialPulse } from "./jobs/refreshSocialPulse.job.js";
+import { describeRedditIngestion, syncRedditPosts } from "./jobs/syncRedditPosts.job.js";
+import {
+  CONFIG_REFRESH_MS,
+  refreshRedditRuntimeConfig,
+} from "./services/reddit/redditRuntimeConfig.js";
+import { syncRedditComments } from "./jobs/syncRedditComments.job.js";
 import { refreshTickerStrip } from "./jobs/refreshTickerStrip.job.js";
 import { refreshTickerSocialMetrics } from "./jobs/refreshTickerSocialMetrics.job.js";
 import { refreshArenaTickerPerformance } from "./jobs/refreshArenaTickerPerformance.job.js";
@@ -114,6 +122,12 @@ function banner(): void {
   console.log(
     `${BRANDING.productName} ingestion worker (${WORKER_NAME}) starting — role=${SERVICE_ROLE}, env=${env.NODE_ENV}`,
   );
+  // THE COST-RELEVANT LINE. Printed once per boot so that, after any surprise on
+  // the invoice, the log says exactly what this process believed it was allowed
+  // to spend and on which communities. Seeing it TWICE in one startup means the
+  // scheduler was registered twice and the bill is doubled.
+  console.log(describeRedditIngestion());
+
   console.log(
     `[worker] social=${env.SOCIAL_DATA_PROVIDER} every ${env.SOCIAL_DATA_REFRESH_SECONDS}s · ` +
       `market=${env.MARKET_DATA_PROVIDER} (mode=${env.MARKET_DATA_MODE}, delay ${env.MARKET_DATA_DELAY_MINUTES}m) every ${env.MARKET_DATA_REFRESH_SECONDS}s`,
@@ -180,6 +194,20 @@ export function startSchedulers(): void {
 
   // Staggered first runs so a cold start does not hit both providers at once,
   // and so the strip job runs after the social/market data it depends on.
+  // SCOPE BEFORE SCHEDULE. The worker has no community variable of its own; it
+  // asks the backend which communities are active and refreshes that answer
+  // every few minutes. A failure here does NOT stop the worker — the market and
+  // analytics jobs are unaffected — it stops REDDIT INGESTION, because a worker
+  // that cannot verify its scope must not spend money guessing at it.
+  // Not awaited: the load is a network call to another service, and blocking
+  // the whole scheduler on it would let a slow backend delay the market and
+  // analytics jobs, which have nothing to do with Reddit scope. The Reddit jobs
+  // are staggered behind it and refuse to run until it has succeeded, so the
+  // ordering is enforced by the guard rather than by the await.
+  void refreshRedditRuntimeConfig();
+  const configTimer = setInterval(() => void refreshRedditRuntimeConfig(), CONFIG_REFRESH_MS);
+  configTimer.unref?.();
+
   loops.push(
     startJobLoop({
       name: "refreshMarketQuotes",
@@ -187,12 +215,70 @@ export function startSchedulers(): void {
       run: refreshMarketQuotes,
       initialDelayMs: 0,
     }),
+    // THE MARKET-DATA PIPELINE, in two halves that never touch Reddit.
+    //
+    //   enqueueMarketDataJobs  reads ticker_activity + watchlists/positions and
+    //                          writes job rows. No provider call.
+    //   marketDataQueue        drains those rows, batches the symbols, and is
+    //                          the only scheduled thing that reaches Databento
+    //                          on demand.
+    //
+    // Deliberately split: the decision about WHAT is worth fetching is cheap,
+    // database-only and safe to run often, while the FETCH is metered and
+    // fails whenever the provider does. Neither one can stall the Reddit jobs
+    // in this same process — a job loop that throws is logged and retried on
+    // its next tick, never propagated.
+    startJobLoop({
+      name: "enqueueMarketDataJobs",
+      intervalSeconds: env.MARKET_DATA_REFRESH_SECONDS,
+      run: enqueueMarketDataWork,
+      // After the first quote refresh, so a cold start does not queue work for
+      // symbols the legacy job is about to fetch anyway.
+      initialDelayMs: 30_000,
+    }),
+    startJobLoop({
+      name: "marketDataQueue",
+      intervalSeconds: env.MARKET_QUEUE_POLL_SECONDS,
+      run: runMarketDataQueue,
+      initialDelayMs: 45_000,
+    }),
     startJobLoop({
       name: "refreshMarketMovers",
       intervalSeconds: env.MARKET_MOVERS_REFRESH_SECONDS,
       run: refreshMarketMovers,
       initialDelayMs: 5_000,
     }),
+    // ── THE MINDCASE INGESTION PAIR ──────────────────────────────────────────
+    //
+    // These two are the ONLY scheduled things that spend money on Reddit data.
+    // Both are WSB-only (redditConfig.ingestionCommunities), both check the
+    // budget before their first request, and both size each request from what
+    // the previous one actually yielded.
+    //
+    // Registered ONCE, here. A second registration would silently double the
+    // bill, which is why the startup banner prints the cadence: two identical
+    // lines in one boot is the symptom.
+    startJobLoop({
+      name: "syncRedditPosts",
+      intervalSeconds: env.REDDIT_POSTS_INTERVAL_MINUTES * 60,
+      run: syncRedditPosts,
+      initialDelayMs: 15_000,
+    }),
+    // TICKS EVERY MINUTE; SPENDS FAR LESS OFTEN. The cadence is not enforced by
+    // this interval but by each thread's persisted `next_sync_at`: when the
+    // market is closed a sync sets it ten minutes out, so the intervening ticks
+    // find nothing due and make ZERO provider requests. Keeping the timer at one
+    // minute means the market opening is picked up within a minute instead of
+    // needing a second scheduler — and because the gate lives in the database
+    // rather than in memory, a restart does not reset it.
+    startJobLoop({
+      name: "syncRedditComments",
+      intervalSeconds: 60,
+      run: syncRedditComments,
+      initialDelayMs: 45_000,
+    }),
+    // Pulse aggregation is now a pure database job — see refreshSocialPulse.
+    // It calls no provider, so its interval is a freshness choice, not a cost.
     startJobLoop({
       name: "refreshSocialPulse",
       intervalSeconds: env.SOCIAL_DATA_REFRESH_SECONDS,

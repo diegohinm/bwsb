@@ -9,6 +9,11 @@ import {
 } from "./tickerAssociations.repository.js";
 import { extractFromParts } from "../services/extraction/tickerExtraction.service.js";
 import {
+  recordTickerActivity,
+  type ActivityEntry,
+} from "../services/social/tickerActivity.service.js";
+import { increment } from "../lib/metrics.js";
+import {
   classifyPostCategory,
   classifyThreadType,
 } from "../services/social/dailyDiscussion.service.js";
@@ -102,7 +107,10 @@ export async function saveSocialItems(
           provider: it.provider,
           source: it.source,
           subreddit: it.subreddit,
-          postExternalId: null,
+          // Known when the comment came from a thread-scoped job. Null only
+          // when the source could not attribute it — never overwritten with
+          // null on update, so an attribution learned later is not lost.
+          postExternalId: it.postExternalId ?? null,
           body: it.text ?? null,
           url: it.url ?? null,
           authorHash: it.authorHash ?? null,
@@ -128,6 +136,7 @@ export async function saveSocialItems(
           url: it.url ?? undefined,
           flairText: it.flair ?? undefined,
           redditId: it.redditId ?? undefined,
+          postExternalId: it.postExternalId ?? undefined,
           fetchedAt: new Date(),
         },
       });
@@ -187,6 +196,7 @@ export async function saveSocialItems(
 
   await attachTickers(pending);
 
+  increment("reddit_items_processed", posts + comments);
   return { posts, comments };
 }
 
@@ -218,13 +228,51 @@ async function attachTickers(pending: PendingAssociation[]): Promise<void> {
     return;
   }
 
+  const activity: ActivityEntry[] = [];
+
   for (const entry of pending) {
     try {
       const matches = extractFromParts(catalog, entry.item.title, entry.item.text);
-      if (entry.kind === "post") await savePostTickers(entry.rowId, matches);
-      else await saveCommentTickers(entry.rowId, matches);
+      const saved =
+        entry.kind === "post"
+          ? await savePostTickers(entry.rowId, matches)
+          : await saveCommentTickers(entry.rowId, matches);
+
+      // The bucket is about WHEN IT WAS SAID. Using the ingestion time would
+      // pile a backfill of last week onto this afternoon and invent a surge —
+      // so an item whose timestamp is unusable is left out of the aggregation
+      // entirely rather than filed under "now".
+      const occurredAt = new Date(entry.item.createdAt);
+      if (Number.isNaN(occurredAt.getTime())) continue;
+
+      // ONLY the first-time associations. A re-ingested post arrives here on
+      // every poll; counting its mentions again each time would make the
+      // ranking a measure of how often the worker ran.
+      for (const ticker of saved.newSymbols) {
+        activity.push({
+          ticker,
+          subreddit: entry.item.subreddit ?? null,
+          sourceType: entry.kind === "post" ? "POST" : "COMMENT",
+          stance: entry.item.stance ?? null,
+          authorHash: entry.item.authorHash ?? null,
+          occurredAt,
+        });
+      }
     } catch (err) {
       console.error(`[social] ticker extraction failed for ${entry.item.id}:`, err);
+    }
+  }
+
+  // Aggregation is an optimization of a query, not a record of anything. It is
+  // written last, in one batch, and its failure is logged and dropped: the
+  // association rows it summarizes are already committed, so `npm run
+  // backfill:reddit` can rebuild any bucket this loses. Letting it throw would
+  // trade a recoverable counter for an unrecoverable Reddit item.
+  if (activity.length > 0) {
+    try {
+      await recordTickerActivity(activity);
+    } catch (err) {
+      console.error("[social] ticker activity aggregation failed (content is saved):", err);
     }
   }
 }

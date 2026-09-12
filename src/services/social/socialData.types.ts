@@ -85,6 +85,17 @@ export interface SocialPostItem {
   confidence: number;
   isScreenshot: boolean;
   /**
+   * For a COMMENT, the Reddit id of the thread it belongs to.
+   *
+   * Carried on the item rather than resolved later because a comments job is
+   * scoped to one thread and therefore KNOWS the parent, while the individual
+   * records frequently omit it. Without this the comment cannot inherit the
+   * thread's Daily/Tomorrow/Weekend classification, and the Daily Discussion
+   * filter — which reads that inherited value rather than joining — would see
+   * nothing. Undefined on posts.
+   */
+  postExternalId?: string;
+  /**
    * The subreddit's own label for the post, when the source returns one.
    *
    * Carried through because it is the most reliable way to recognize a daily

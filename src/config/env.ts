@@ -353,6 +353,168 @@ const envSchema = z.object({
   DATABENTO_DATASET: optionalNonEmpty,
   DATABENTO_OVERNIGHT_DATASET: optionalNonEmpty,
 
+  // ── Mindcase ingestion cadence + cost control ──────────────────────────────
+  //
+  // MINDCASE BILLS PER ROW RETURNED, ~$0.005 each. Not per request: a response
+  // of fifty rows already in the database costs exactly what fifty new ones
+  // cost. Every knob below exists to reduce ROWS, and counting HTTP requests
+  // would measure none of them.
+  //
+  // The agent has NO server-side time filter — no `after`, `since`, `cursor` or
+  // `page`; it crawls a Reddit listing URL and returns the newest N. So
+  // "incremental" cannot mean "ask for what changed". It means: ask for the
+  // smallest N that plausibly covers what changed, and stop the moment a
+  // known id appears. See services/reddit/redditSync.service.ts.
+
+  /** Minutes between post syncs. Posts only discover threads; 10 is ample. */
+  REDDIT_POSTS_INTERVAL_MINUTES: intEnv(10, 1, 1_440),
+  /**
+   * Minutes between comment syncs WHILE THE US MARKET IS OPEN.
+   *
+   * One minute is an incremental attempt, not a reload: it asks for a small
+   * page and stops at the first id already stored.
+   */
+  REDDIT_COMMENTS_MARKET_OPEN_INTERVAL_MINUTES: intEnv(1, 1, 1_440),
+  /** Minutes between comment syncs when the market is closed. */
+  REDDIT_COMMENTS_MARKET_CLOSED_INTERVAL_MINUTES: intEnv(10, 1, 1_440),
+
+  /**
+   * Rows requested per post sync.
+   *
+   * Ten minutes of r/wallstreetbets is typically 5–15 new posts, so 50 was
+   * buying roughly 35 duplicates every cycle. This is an UPPER BOUND — the
+   * adaptive sizer asks for less when the last sync found little.
+   */
+  REDDIT_POSTS_FETCH_LIMIT: intEnv(25, 1, 100),
+  /** Rows requested per comment sync. */
+  REDDIT_COMMENTS_FETCH_LIMIT: intEnv(20, 1, 100),
+  /**
+   * Floor for the adaptive sizer, so it can never shrink to a request too small
+   * to notice a burst. Below roughly ten rows the boundary check stops being
+   * able to tell "nothing new" from "the page was too short to reach the
+   * boundary".
+   */
+  REDDIT_MIN_FETCH_LIMIT: intEnv(10, 1, 100),
+
+  /**
+   * Seconds of overlap re-requested around the checkpoint.
+   *
+   * Provider timestamps are coarse and arrival order is not guaranteed, so a
+   * strict `> lastSeen` boundary drops items written in the same second. Thirty
+   * seconds of overlap costs a handful of rows; thirty MINUTES would cost the
+   * saving this refactor exists to produce.
+   */
+  REDDIT_SYNC_OVERLAP_SECONDS: intEnv(30, 0, 3_600),
+
+  /**
+   * Hard cap on requests per stream per sync.
+   *
+   * TWO, not five. Each extra page is another full page of billable rows, and
+   * the boundary check means a second page is only ever reached when the first
+   * was entirely new — a genuine burst. A high cap turns one bad day into a
+   * large invoice.
+   */
+  REDDIT_MAX_PAGES_PER_SYNC: intEnv(2, 1, 10),
+  /**
+   * Cap when catching up after downtime. Deliberately not larger than the
+   * normal cap: a worker that was off for eight hours must resume gradually
+   * rather than spend the daily budget in its first minute.
+   */
+  REDDIT_MAX_PAGES_PER_CATCHUP: intEnv(3, 1, 20),
+
+  /** How many threads one comment sweep may touch. Bounds a single run's spend. */
+  REDDIT_COMMENT_THREADS_PER_SYNC: intEnv(2, 1, 50),
+  /**
+   * Empty syncs before a thread is retired. A thread nobody is commenting on
+   * must leave the rotation, or the sweep grows without bound.
+   */
+  REDDIT_THREAD_IDLE_RUNS: intEnv(5, 1, 100),
+
+  // ── Budget guard ───────────────────────────────────────────────────────────
+  // SAFETY LIMITS, NOT SPEND TARGETS. They exist so a bug cannot produce an
+  // unbounded invoice. Crossing one pauses INGESTION only — the API, Discussion,
+  // search and the summary keep serving from Postgres.
+
+  /** Published price per returned row. Only used to estimate, never billed on. */
+  MINDCASE_COST_PER_RESULT_USD: z.coerce.number().nonnegative().default(0.005),
+  MINDCASE_MAX_ROWS_PER_HOUR: intEnv(2_000, 0, 1_000_000),
+  MINDCASE_MAX_ROWS_PER_DAY: intEnv(10_000, 0, 10_000_000),
+  MINDCASE_MAX_ESTIMATED_COST_PER_DAY_USD: z.coerce.number().nonnegative().default(50),
+
+  // ── Reddit / market separation ─────────────────────────────────────────────
+  //
+  // MIGRATION FLAGS, NOT PERMANENT CONFIGURATION. Each one exists to make a
+  // single switchover reversible without a deploy, and each defaults to the NEW
+  // behaviour so a fresh environment is already on the target architecture. They
+  // are meant to be deleted once the corresponding path has run unattended for a
+  // while — a flag that outlives its migration is just an untested code path
+  // kept alive forever.
+
+  /**
+   * Serve Top Tickers / Hot Tickers from `ticker_activity` instead of scanning
+   * the association tables per request.
+   *
+   * Set to false to fall back to the raw GROUP BY, which is the ONLY correct
+   * choice while the backfill is still running: aggregation rows do not exist
+   * for history that has not been processed yet, and a half-filled bucket table
+   * would report a real ranking with the old half of the window missing.
+   */
+  DISCUSSION_USE_AGGREGATIONS: boolFromString(true),
+  /**
+   * Minimum mentions in the current window before a ticker may be ranked hot.
+   *
+   * A floor is what keeps hotness from degenerating into "symbols that went
+   * from one mention to three". Zero disables it, which is useful on a nearly
+   * empty development database and wrong everywhere else.
+   *
+   * This is a LOWER BOUND on the window-scaled floor the summary computes (see
+   * discussionSummary.minimumHotMentions) — raising it raises every window,
+   * while the scaling keeps an hour and a month from sharing one threshold.
+   */
+  HOT_TICKERS_MIN_MENTIONS: intEnv(5, 0, 10_000),
+
+  /**
+   * Whether the API may enqueue market-data refresh jobs, and whether the
+   * worker consumes them.
+   *
+   * Off, the system behaves exactly as it did before the queue existed: the
+   * scheduled quote job refreshes its fixed symbol list and nothing else is
+   * requested. Nothing breaks — reads still serve whatever snapshots exist.
+   */
+  MARKET_DATA_QUEUE_ENABLED: boolFromString(true),
+  /**
+   * Serve a stale snapshot immediately and refresh it in the background, rather
+   * than making the reader wait for a provider round-trip.
+   *
+   * Off, a stale row is still served — it is simply not refreshed as a result of
+   * having been read. The API NEVER blocks on Databento either way; this flag
+   * only decides whether a read is allowed to schedule work.
+   */
+  MARKET_STALE_WHILE_REVALIDATE: boolFromString(true),
+  /**
+   * How old a stored quote may be before a read treats it as stale and asks for
+   * a refresh. Not how old it may be before it stops being served — a stale
+   * quote clearly labeled as stale beats an empty panel.
+   */
+  QUOTE_TTL_SECONDS: intEnv(30, 5, 86_400),
+  /**
+   * Volume-bearing snapshot TTL, separate because volume is cumulative and
+   * therefore tolerable at a lower refresh rate than price.
+   */
+  VOLUME_TTL_SECONDS: intEnv(60, 5, 86_400),
+  /**
+   * Symbols per upstream request when the provider accepts several.
+   *
+   * 50 is a starting point, not a provider limit: the effective cap is whatever
+   * the configured provider actually permits, and the worker clamps to it (see
+   * workers/market/databentoWorker.ts).
+   */
+  MARKET_DATA_BATCH_SIZE: intEnv(50, 1, 500),
+  /** WORKER: seconds between market-data queue drains. */
+  MARKET_QUEUE_POLL_SECONDS: intEnv(20, 5, 3_600),
+  /** How many jobs one drain may claim. Bounds a single run's provider spend. */
+  MARKET_QUEUE_BATCH_LIMIT: intEnv(200, 1, 5_000),
+
   /**
    * Whether `prisma db seed` may insert DEVELOPMENT/DEMO content — fake users,
    * bets, portfolios, social posts and mock market data.

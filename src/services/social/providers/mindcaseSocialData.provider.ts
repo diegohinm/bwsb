@@ -4,7 +4,8 @@ import { canonicalRedditUrl, normalizeFlair } from "../redditPermalink.js";
 
 import { env } from "../../../config/env.js";
 import { assertProviderCallsAllowed } from "../../../config/serviceRole.js";
-import { redditConfig } from "../../../config/reddit.config.js";
+import { assertCommunityIsActive } from "../../reddit/redditRuntimeConfig.js";
+import { resolveEffectiveRedditCommunities } from "../../../config/redditCommunities.js";
 import { classifySocialItem } from "../socialClassifier.service.js";
 import { extractTickersFrom } from "../tickerExtractor.service.js";
 import {
@@ -79,6 +80,11 @@ export class MindcaseJobTimeoutError extends Error {
 
 const REQUEST_TIMEOUT_MS = 12_000;
 const MAX_RESULTS_PER_SUBREDDIT = 50;
+
+/** The agent rejects 0 and will not return more than 100 in one run. */
+function clampRows(value: number): number {
+  return Math.max(1, Math.min(100, Math.trunc(value)));
+}
 /** Backoff after a 429/5xx when the response carries no Retry-After header. */
 const BACKOFF_BASE_MS = 2_000;
 /** Never sleep longer than this on a single backoff, whatever Retry-After says. */
@@ -144,9 +150,11 @@ export class MindcaseSocialDataProvider implements SocialDataProvider {
     subreddits?: string[];
   }): Promise<SubredditPulseResponse> {
     if (!this.configured) throw new MindcaseNotConfiguredError();
-    const subs = params.subreddits?.length
-      ? params.subreddits
-      : [...redditConfig.subreddits];
+    // ACTIVE, not tracked. This defaulted to every tracked subreddit, which is
+    // a second path by which a caller that named none would have bought
+    // r/options — the guard in fetchSubredditPosts would now refuse it, but
+    // throwing on a normal call is not the behaviour we want either.
+    const subs = resolveEffectiveRedditCommunities(params.subreddits);
     const sweep = await this.fetchManySubreddits(subs, params.q);
     assertUsable(sweep);
     return assemblePulseResponse(
@@ -169,10 +177,9 @@ export class MindcaseSocialDataProvider implements SocialDataProvider {
   }): Promise<TickerSocialFeedResponse> {
     if (!this.configured) throw new MindcaseNotConfiguredError();
     // Scope to a single subreddit when the caller asked for one, else sweep all.
-    const subs =
-      params.subreddit && params.subreddit !== "all"
-        ? [params.subreddit.replace(/^r\//i, "")]
-        : [...redditConfig.subreddits];
+    const subs = resolveEffectiveRedditCommunities(
+      params.subreddit && params.subreddit !== "all" ? [params.subreddit] : null,
+    );
     // Search each community for the ticker cashtag.
     const sweep = await this.fetchManySubreddits(subs, `$${params.ticker}`);
     assertUsable(sweep);
@@ -190,12 +197,72 @@ export class MindcaseSocialDataProvider implements SocialDataProvider {
   async fetchItems(params: {
     subreddits?: string[];
     keyword?: string;
+    /**
+     * Rows to buy per subreddit. THE ONLY COST LEVER THIS AGENT EXPOSES — it
+     * takes `{ urls, maxResults }` and nothing else, so there is no way to ask
+     * for "only what changed". Omitting it falls back to the legacy constant,
+     * which is what the scheduled sweep used to pay for every ten minutes.
+     */
+    maxResults?: number;
   }): Promise<SweepResult> {
     if (!this.configured) throw new MindcaseNotConfiguredError();
-    const subs = params.subreddits?.length
-      ? params.subreddits
-      : [...redditConfig.subreddits];
-    return this.fetchManySubreddits(subs, params.keyword);
+    // NO LOCAL DEFAULT. An omitted list used to fall back to
+    // `redditConfig.subreddits` — all five communities — which is how a caller
+    // that simply forgot to pass one ended up buying r/options. The caller must
+    // now say what it wants, and every entry is checked against the runtime
+    // config before a request leaves (see fetchSubredditPosts).
+    const subs = params.subreddits?.length ? params.subreddits : [];
+    if (subs.length === 0) {
+      throw new Error(
+        "Mindcase blocked: fetchItems requires an explicit community list. " +
+          "There is deliberately no default — see config/redditCommunities.ts.",
+      );
+    }
+    return this.fetchManySubreddits(subs, params.keyword, params.maxResults);
+  }
+
+  /**
+   * Comments for ONE thread.
+   *
+   * Scoped to a thread rather than the whole subreddit because the bill is per
+   * row: a subreddit-wide comment sweep returns whatever the crawler finds
+   * across every thread, most of it from conversations nobody is reading. The
+   * megathread is where the value is, and asking for it by URL is what keeps a
+   * one-minute cadence affordable.
+   */
+  async fetchThreadComments(params: {
+    subreddit: string;
+    /** Reddit's bare post id, e.g. `1vi969l`. */
+    threadId: string;
+    maxResults: number;
+  }): Promise<SocialPostItem[]> {
+    if (!this.configured) throw new MindcaseNotConfiguredError();
+
+    const subreddit = params.subreddit.replace(/^r\//i, "").toLowerCase();
+    assertCommunityIsActive(subreddit);
+    console.log(`[reddit/comments] community=${subreddit} thread=${params.threadId}`);
+
+    const url = `https://www.reddit.com/r/${subreddit}/comments/${params.threadId}/`;
+
+    const run = await this.request<MindcaseRecord>("POST", "/agents/reddit/comments/run", {
+      params: { urls: url, maxResults: params.maxResults },
+    });
+
+    let records = extractRecords(run);
+    if (records.length === 0) {
+      const jobId =
+        str(run.jobId) ?? str(run.job_id) ?? str(run.id) ?? str((run.data as MindcaseRecord)?.id);
+      records = jobId ? await this.pollJob(jobId) : [];
+    }
+
+    const items: SocialPostItem[] = [];
+    for (const record of records) {
+      const item = this.mapItem(record, subreddit);
+      // A comments job knows its parent even when the record omits it, and the
+      // parent is what lets a comment inherit the thread's Daily/Tomorrow type.
+      if (item) items.push({ ...item, type: "comment", postExternalId: params.threadId });
+    }
+    return items;
   }
 
   private meta(warning?: string): ResponseMeta {
@@ -224,6 +291,7 @@ export class MindcaseSocialDataProvider implements SocialDataProvider {
   private async fetchManySubreddits(
     subs: string[],
     keyword?: string,
+    maxResults?: number,
   ): Promise<SweepResult> {
     const items: SocialPostItem[] = [];
     const failed: string[] = [];
@@ -235,7 +303,7 @@ export class MindcaseSocialDataProvider implements SocialDataProvider {
       while (cursor < subs.length) {
         const sub = subs[cursor++];
         try {
-          const records = await this.fetchSubredditPosts(sub, keyword);
+          const records = await this.fetchSubredditPosts(sub, keyword, maxResults);
           for (const r of records) {
             const item = this.mapItem(r, sub);
             if (item) items.push(item);
@@ -256,12 +324,24 @@ export class MindcaseSocialDataProvider implements SocialDataProvider {
   private async fetchSubredditPosts(
     subreddit: string,
     keyword?: string,
+    maxResults?: number,
   ): Promise<MindcaseRecord[]> {
+    // THE LAST LINE BEFORE MONEY IS SPENT. Deliberately here, inside the client,
+    // rather than in the job that calls it: the failure this exists for is a
+    // BUGGY CALLER — legacy code, a revived helper, a hardcoded string in a
+    // script. A guard in the caller cannot catch a caller that skips it.
+    assertCommunityIsActive(subreddit);
+    console.log(`[reddit/posts] community=${subreddit}`);
+
     const body = {
       params: {
-        urls: `https://www.reddit.com/r/${subreddit}/`,
+        // `/new/` rather than the subreddit root: the root serves "hot", which
+        // re-ranks old threads to the top and bills us for them again. Newest-
+        // first is the only ordering under which "stop at the first id I already
+        // have" is a sound boundary.
+        urls: `https://www.reddit.com/r/${subreddit}/new/`,
         ...(keyword ? { keyword } : {}),
-        maxResults: MAX_RESULTS_PER_SUBREDDIT,
+        maxResults: clampRows(maxResults ?? MAX_RESULTS_PER_SUBREDDIT),
       },
     };
 

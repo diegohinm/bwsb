@@ -35,7 +35,19 @@ const SUBREDDIT_PATTERN = /^[a-z0-9_]{2,21}$/i;
 export const MIN_POLL_INTERVAL_MS = 300_000;
 
 export interface RedditConfig {
-  /** Ordered, normalized, de-duplicated. The round-robin walks this array. */
+  /**
+   * TRACKED communities — every subreddit the product knows about.
+   *
+   * This is a DISPLAY/ANALYTICS list, not a billing one. It drives the free
+   * Arctic Shift round-robin, stored-content queries and multi-community
+   * surfaces, and it deliberately still contains stocks, options, investing and
+   * the rest: none of that support was removed.
+   *
+   * WHICH OF THEM ARE ACTIVE is a different question with a different owner:
+   * config/redditCommunities.ts, fed by REDDIT_ACTIVE_COMMUNITIES. Nothing that
+   * decides what to INGEST, QUERY or SHOW may read this list — that conflation
+   * is what sent r/options to a metered provider.
+   */
   subreddits: readonly string[];
   pollIntervalMs: number;
   postLimit: number;

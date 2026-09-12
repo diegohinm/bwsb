@@ -1,5 +1,6 @@
 import { env, extendedHoursEnabled } from "../../config/env.js";
 import { memoryCache } from "../cache/memoryCache.js";
+import { increment } from "../../lib/metrics.js";
 import { getMarketDataProvider, mockMarketDataProvider } from "./marketDataProvider.factory.js";
 import { currentSession, isRegularSession, round2 } from "./marketData.util.js";
 import { isExtendedHoursSession } from "./marketData.types.js";
@@ -78,6 +79,7 @@ function recordError(err: unknown): string {
   const msg = err instanceof Error ? err.message : String(err);
   diagnostics.lastErrorAt = new Date().toISOString();
   diagnostics.lastError = msg;
+  increment("databento_errors");
   return msg;
 }
 function recordSuccess(usingMock: boolean): void {
@@ -92,6 +94,24 @@ function isMockProvider(): boolean {
 // ── Status ───────────────────────────────────────────────────────────────────
 
 /** Provider status with EFFECTIVE (license-aware) capability flags. */
+/**
+ * COUNT EVERY UPSTREAM REQUEST, at the one place they are all made.
+ *
+ * Placed here rather than in the callers because the question this answers —
+ * "did serving that page cost a provider request?" — must not depend on
+ * remembering to instrument a new caller. `databento_requests` on the API
+ * process is expected to stay at ZERO after this refactor; the worker's is
+ * expected to be the only one that moves.
+ *
+ * The name says Databento because that is the provider in use; it counts
+ * whatever `MARKET_DATA_PROVIDER` names, mock excluded (mock calls never reach
+ * these lines).
+ */
+function countProviderRequest(symbols: number): void {
+  increment("databento_requests");
+  increment("databento_symbols_requested", Math.max(0, symbols));
+}
+
 export async function getMarketProviderStatus(): Promise<MarketDataProviderStatus> {
   const provider = getMarketDataProvider();
   let base: MarketDataProviderStatus;
@@ -167,6 +187,7 @@ export async function getQuote(symbol: string): Promise<MarketQuote> {
     recordSuccess(true);
   } else {
     try {
+      countProviderRequest(1);
       const raw = await getMarketDataProvider().getQuote(sym);
       result = labelQuote(raw);
       recordSuccess(result.isMock);
@@ -194,6 +215,7 @@ export async function getQuotes(symbols: string[]): Promise<MarketQuote[]> {
     recordSuccess(true);
   } else {
     try {
+      countProviderRequest(syms.length);
       const raw = await getMarketDataProvider().getQuotes(syms);
       const bySym = new Map(raw.map((q) => [q.symbol.toUpperCase(), labelQuote(q)]));
       // Backfill any symbol the provider didn't return with mock data.
@@ -284,6 +306,7 @@ export async function getDelayedQuotesForIngestion(
   const session = currentSession();
   const marketOpen = session !== "closed";
 
+  countProviderRequest(symbols.length);
   const bars = await provider.getDelayedBars({ symbols, cutoffIso: cutoff });
 
   // Previous daily close → change / changePct. Best-effort: a failure here must
@@ -291,6 +314,7 @@ export async function getDelayedQuotesForIngestion(
   let previousCloses = new Map<string, number>();
   if (bars.latestBySymbol.size > 0 && typeof provider.getPreviousDailyCloses === "function") {
     try {
+      countProviderRequest(bars.latestBySymbol.size);
       previousCloses = await provider.getPreviousDailyCloses([...bars.latestBySymbol.keys()], cutoff);
     } catch (err) {
       recordError(err);
@@ -400,6 +424,7 @@ export async function getCandles(params: {
     recordSuccess(true);
   } else {
     try {
+      countProviderRequest(1);
       const raw = await getMarketDataProvider().getCandles({ ...params, symbol: sym });
       const mode = equityDisplayMode();
       result = raw.map((c) => ({ ...c, displayMode: mode, isDelayed: mode !== "realtime" }));
@@ -529,6 +554,7 @@ export async function getMarketMovers(params: {
   } else {
     try {
       // Real provider — for overnight this uses the Databento overnight dataset.
+      countProviderRequest(1);
       const movers = await getMarketDataProvider().getMarketMovers({ session, limit });
       const mode = equityDisplayMode();
       resp = buildMoversResponse({
@@ -605,6 +631,7 @@ export async function getOptionChain(params: {
     recordSuccess(true);
   } else {
     try {
+      countProviderRequest(1);
       const raw = await getMarketDataProvider().getOptionChain({ ...params, underlying });
       result = labelOptionChain(raw);
       recordSuccess(false);

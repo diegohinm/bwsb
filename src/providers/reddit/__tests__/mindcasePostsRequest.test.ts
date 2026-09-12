@@ -1,7 +1,7 @@
 import { captureConsole, stubFetch, testConfig, TEST_API_KEY } from "./helpers.js";
 
 import assert from "node:assert/strict";
-import { describe, it } from "node:test";
+import { describe, it, beforeEach } from "node:test";
 
 import { buildRedditDataConfig } from "../../../config/redditDataConfig.js";
 import { MindcaseProvider } from "../MindcaseProvider.js";
@@ -14,6 +14,18 @@ import {
 } from "../mindcaseRedditRequest.js";
 import { RedditProviderError } from "../providerErrors.js";
 import { toObservedError } from "../providerObserver.js";
+
+import { __setRuntimeConfigForTests } from "../../../services/reddit/redditRuntimeConfig.js";
+
+/**
+ * The Mindcase clients now refuse to run without a verified community scope
+ * (see services/reddit/redditRuntimeConfig). These tests exercise the WIRE
+ * CONTRACT, not the guard, so they install the scope the production worker
+ * would have fetched from the backend. The guard itself is covered in
+ * services/reddit/__tests__/redditRuntimeConfig.test.ts.
+ */
+beforeEach(() => __setRuntimeConfigForTests(["wallstreetbets"]));
+
 
 /**
  * The reddit/posts agent contract.

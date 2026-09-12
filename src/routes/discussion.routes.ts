@@ -1,7 +1,7 @@
+import { effectiveCommunitiesFromQuery } from "../config/redditCommunities.js";
 import { Router } from "express";
 
 import { asyncHandler, fail } from "../lib/response.js";
-import { parseSubredditFilter } from "../services/social/subreddits.js";
 import { PULSE_TIMEFRAME_MS, isPulseTimeframe } from "../services/social/socialData.types.js";
 import {
   DEFAULT_FEED_LIMIT,
@@ -199,9 +199,11 @@ discussionRouter.get(
       // Daily Discussion is r/wallstreetbets only, and that is enforced HERE —
       // a direct call naming other communities does not get a half-honoured
       // scope.
+      // CLAMPED TO ACTIVE COMMUNITIES before anything else looks at it: a
+      // query string cannot widen scope, whatever it names.
       subreddits: enforceDailyScope(
         contentType,
-        parseSubredditFilter(firstString(req.query.subreddits)),
+        effectiveCommunitiesFromQuery(firstString(req.query.subreddits)),
       ),
       contentType,
       discussionType: readDiscussionType(req.query.discussionType),
@@ -262,7 +264,7 @@ discussionRouter.get(
       range: range === "custom" && (!from || !to) ? "24h" : range,
       ...(from ? { from } : {}),
       ...(to ? { to } : {}),
-      subreddits: parseSubredditFilter(firstString(req.query.subreddits)),
+      subreddits: effectiveCommunitiesFromQuery(firstString(req.query.subreddits)),
     });
 
     return res.json({ data: summary });
@@ -330,7 +332,7 @@ discussionRouter.get(
 
     const snapshot = await readDiscussion({
       symbol,
-      subreddits: parseSubredditFilter(firstString(req.query.subreddits)),
+      subreddits: effectiveCommunitiesFromQuery(firstString(req.query.subreddits)),
       since: readSince(req.query.timeframe),
       search: firstString(req.query.search),
       sort: readSort(req.query.sort),

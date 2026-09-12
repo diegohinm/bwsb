@@ -1,3 +1,4 @@
+import { assertCommunityIsActive } from "../../services/reddit/redditRuntimeConfig.js";
 import { assertProviderCallsAllowed } from "../../config/serviceRole.js";
 import type { MindcaseConfig, RedditDataConfig } from "../../config/redditDataConfig.js";
 import { requestJson, sleep } from "./httpClient.js";
@@ -132,6 +133,13 @@ export class MindcaseProvider implements RedditDataProvider {
         "fetchPosts requires a subreddit.",
       );
     }
+    // THE SECOND MINDCASE CLIENT IN THIS REPO, and therefore the second place
+    // the scope guard has to live. This one is only constructed when
+    // REDDIT_DATA_MODE names Mindcase, so it is dormant today — which is
+    // exactly why it is easy to forget, and exactly the kind of dormant path
+    // that wakes up one deploy later still pointing at the old subreddit list.
+    assertCommunityIsActive(subreddit);
+    console.log(`[reddit/posts] community=${subreddit}`);
 
     // The normalized input the app speaks internally is TRANSLATED here into
     // the agent's contract. Nothing from `input` is spread onto the payload —
@@ -300,6 +308,11 @@ export class MindcaseProvider implements RedditDataProvider {
         "fetchComments requires a postUrl, a postId + subreddit, or a subreddit.",
       );
     }
+
+    // Scoped by post URL or by subreddit; either way a community is implied and
+    // it has to be an active one before a billable request leaves.
+    if (subreddit) assertCommunityIsActive(subreddit);
+    console.log(`[reddit/comments] community=${subreddit || "(by-url)"}`);
 
     const limit = clampLimit(input.limit);
     console.log(

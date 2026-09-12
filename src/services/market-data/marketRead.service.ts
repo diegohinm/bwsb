@@ -5,6 +5,11 @@ import {
   type StoredQuote,
 } from "../../repositories/marketSnapshots.repository.js";
 import { mockMarketDataProvider } from "./marketDataProvider.factory.js";
+import {
+  enqueueMarketDataJobs,
+  MARKET_PRIORITY,
+} from "./marketDataQueue.service.js";
+import { increment } from "../../lib/metrics.js";
 import { currentSession, isRegularSession } from "./marketData.util.js";
 import { overnightEnabled, type MarketMoversResponse } from "./marketData.service.js";
 import {
@@ -57,6 +62,60 @@ export interface ApiMarketQuote extends MarketQuote {
    * as live.
    */
   isLastRegularClose: boolean;
+  /**
+   * Older than QUOTE_TTL_SECONDS, and a refresh has been requested.
+   *
+   * IT IS STILL SERVED. Stale-while-revalidate: an out-of-date number that says
+   * how out of date it is beats an empty panel, and beats making the reader wait
+   * for a provider round-trip that may never complete. The refresh happens in
+   * the worker, afterwards, for whoever looks next.
+   */
+  isStale: boolean;
+}
+
+/**
+ * How old a stored quote may be before a read asks for a refresh.
+ *
+ * Not how old it may be before it stops being served — nothing here ever
+ * withholds a row for being stale.
+ *
+ * Only while the market is OPEN. A Saturday-afternoon quote is thirty hours old
+ * and perfectly correct: the last close is the current price, and treating its
+ * age as staleness would queue a refresh for every symbol, every weekend, to
+ * re-fetch a number that cannot have changed.
+ */
+function isStaleQuote(storedAt: string | null, marketOpen: boolean): boolean {
+  if (!marketOpen) return false;
+  if (!storedAt) return true;
+  const age = Date.now() - new Date(storedAt).getTime();
+  return age > env.QUOTE_TTL_SECONDS * 1_000;
+}
+
+/**
+ * Ask the worker to refresh these symbols. NEVER AWAITED BY A RESPONSE.
+ *
+ * This is the single point where an API request can cause market data to be
+ * fetched at all, and it is deliberately the weakest possible coupling: it
+ * writes a row and returns. If the queue write fails, the reader still gets
+ * their data and the scheduled sweep will pick the symbol up anyway — so this is
+ * logged and dropped rather than surfaced.
+ *
+ * PRIORITY 1: somebody is looking at this symbol right now, which is the
+ * strongest demand signal the system has.
+ */
+function requestRefresh(symbols: string[]): void {
+  if (symbols.length === 0) return;
+  if (!env.MARKET_STALE_WHILE_REVALIDATE || !env.MARKET_DATA_QUEUE_ENABLED) return;
+
+  void enqueueMarketDataJobs(
+    symbols.map((ticker) => ({
+      ticker,
+      jobType: "QUOTE" as const,
+      priority: MARKET_PRIORITY.REALTIME,
+    })),
+  ).catch((err) => {
+    console.error("[market-read] could not queue a refresh (serving stored data):", err);
+  });
 }
 
 /**
@@ -72,6 +131,7 @@ function safeSession(session: MarketSession): MarketSession {
 
 function fromStored(q: StoredQuote, marketOpen: boolean): ApiMarketQuote {
   const displayMode = safeMode(q.displayMode);
+  const isStale = isStaleQuote(q.storedAt, marketOpen);
   const session = safeSession(q.session);
   // Outside 09:30–16:00 ET nothing stored can be a live quote: it is by
   // definition the last close we captured while the market was open.
@@ -92,6 +152,7 @@ function fromStored(q: StoredQuote, marketOpen: boolean): ApiMarketQuote {
     isDelayed: displayMode !== "realtime",
     delayMinutes: q.delayMinutes ?? DELAY_MINUTES,
     isLastRegularClose,
+    isStale,
     ...(warning ? { warning } : {}),
   };
 }
@@ -108,6 +169,9 @@ async function demoQuote(symbol: string): Promise<ApiMarketQuote> {
     delayMinutes: null,
     storedAt: null,
     isLastRegularClose: false,
+    // A symbol with no row at all is not "stale" — there is nothing to be stale.
+    // It is missing, which `isMock` + the warning already say.
+    isStale: false,
     warning: WARN_NOT_INGESTED,
   };
 }
@@ -131,6 +195,17 @@ export async function getStoredQuotes(symbols: string[]): Promise<ApiMarketQuote
   if (out.some((q) => q.isMock) && out.some((q) => !q.isMock)) {
     for (const q of out) if (q.isMock) q.warning = WARN_PARTIAL;
   }
+
+  // STALE-WHILE-REVALIDATE. The rows above have already been assembled and are
+  // about to be returned; this only schedules work for the NEXT reader. A
+  // symbol with no stored row is included, because "never fetched" is the case
+  // most in need of a fetch.
+  const needsRefresh = out.filter((q) => q.isStale || q.isMock).map((q) => q.symbol);
+  increment("market_cache_hits", out.length - needsRefresh.length);
+  increment("market_cache_misses", needsRefresh.length);
+  increment("market_cache_stale_served", out.filter((q) => q.isStale).length);
+  requestRefresh(needsRefresh);
+
   return out;
 }
 

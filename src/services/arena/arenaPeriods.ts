@@ -1,3 +1,5 @@
+import { ACTIVE_REDDIT_COMMUNITIES } from "../../config/redditCommunities.js";
+
 /**
  * THE Arena period and scope vocabulary. Single source of truth for the worker,
  * the API and the delay rule, so none of them can drift.
@@ -9,17 +11,20 @@ export type ArenaPeriod = (typeof ARENA_PERIODS)[number];
 export const ARENA_SCOPES = ["wallstreetbets", "all"] as const;
 export type ArenaScope = (typeof ARENA_SCOPES)[number];
 
-/** Communities aggregated by the `all` scope. */
-export const ARENA_ALL_SUBREDDITS = [
-  "wallstreetbets",
-  "stocks",
-  "investing",
-  "options",
-  "pennystocks",
-  "Shortsqueeze",
-  "ValueInvesting",
-  "SecurityAnalysis",
-] as const;
+/**
+ * Communities aggregated by the `all` scope.
+ *
+ * DERIVED, not listed. This was a hardcoded array of eight subreddits — a
+ * parallel list that decided WHAT TO QUERY, sitting beside the backend's
+ * community config and drifting from it. The Arena "all" scope would happily
+ * aggregate r/options into today's leaderboard long after the product stopped
+ * reading r/options anywhere else.
+ *
+ * It reads stored rows, so it never cost provider money; it cost CORRECTNESS,
+ * which is the other half of the same problem. Historical rows from inactive
+ * communities stay in the database and simply stop being aggregated.
+ */
+export const ARENA_ALL_SUBREDDITS: readonly string[] = ACTIVE_REDDIT_COMMUNITIES;
 
 export function isArenaPeriod(value: unknown): value is ArenaPeriod {
   return typeof value === "string" && (ARENA_PERIODS as readonly string[]).includes(value);

@@ -1,4 +1,5 @@
 import { pathToFileURL } from "node:url";
+import { increment } from "./metrics.js";
 
 import { WORKER_NAME } from "../config/ingestion.js";
 import { disconnectPrisma } from "./prisma.js";
@@ -142,6 +143,11 @@ async function safeRecord(run: Parameters<typeof recordWorkerRun>[0]): Promise<v
   }
 }
 
+/** Counted so a skipped tick is visible on /health/metrics, not only in logs. */
+function countOverlapSkip(): void {
+  increment("mindcase_sync_skipped_overlap_total");
+}
+
 export interface JobLoopHandle {
   name: string;
   /** Stop scheduling. An in-flight run is awaited by the caller if needed. */
@@ -172,6 +178,18 @@ export function startJobLoop(options: {
     if (stopped) return;
     if (running) {
       // Previous run still in flight — skip this tick rather than pile up.
+      //
+      // THIS IS A COST GUARD, not just tidiness. A comment sync that takes 80
+      // seconds under a 60-second timer would otherwise have two runs in flight,
+      // both buying the same rows from the same threads — the overlap would be
+      // billed twice and neither run's checkpoint would reflect the other's.
+      //
+      // IN-PROCESS ONLY. It protects one worker against itself, which is exactly
+      // what today's single-worker deployment needs. Two worker instances would
+      // each keep their own `running` flag and could overlap; the persisted
+      // `next_sync_at` narrows that window but does not close it. A real fix is
+      // a database lease, as reddit_worker_state already does for Arctic Shift.
+      countOverlapSkip();
       console.warn(`[worker] ${name}: previous run still active, skipping tick`);
       await record({
         workerName: WORKER_NAME,

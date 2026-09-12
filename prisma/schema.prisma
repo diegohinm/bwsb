@@ -1,22 +1,3 @@
-// Prisma schema for bwsb (backend for YOLOPulse, internal project "wsb").
-//
-// This file is the SINGLE SOURCE OF TRUTH for the database schema. It was
-// introspected from the existing production database and baselined as
-// prisma/migrations/0_init. Change the schema here, then run
-// `npx prisma migrate dev --name <change>` — never edit the database by hand
-// and never run `prisma db push`.
-//
-// Naming: models are PascalCase and fields camelCase, mapped back to the
-// unchanged snake_case database names with @@map / @map. The database is never
-// renamed.
-//
-// PostgreSQL behaviour Prisma cannot express (the pgcrypto extension, RLS,
-// partial indexes) lives in the migration SQL, not in application code. See
-// prisma/migrations/0_init/migration.sql.
-//
-// The datasource reads DATABASE_URL — server-side only, never exposed to the
-// frontend.
-
 generator client {
   provider = "prisma-client-js"
 }
@@ -72,6 +53,7 @@ model AppUsers {
   avatarSeed                      String?                           @map("avatar_seed")
   googleSub                       String?                           @map("google_sub")
   authProvider                    String?                           @map("auth_provider")
+  arenaUserPerformanceSnapshots   ArenaUserPerformanceSnapshots[]
   authEvents                      AuthEvents[]
   competitionLeaderboardSnapshots CompetitionLeaderboardSnapshots[]
   competitionParticipants         CompetitionParticipants[]
@@ -79,9 +61,8 @@ model AppUsers {
   passwordResetTokens             PasswordResetTokens[]
   redditAccounts                  RedditAccounts[]
   redditVerificationRequests      RedditVerificationRequests[]
-  userNotifications               UserNotifications[]
-  arenaUserPerformanceSnapshots   ArenaUserPerformanceSnapshots[]
   userCalendarPreferences         UserCalendarPreferences?
+  userNotifications               UserNotifications[]
   userSessions                    UserSessions[]
   virtualAccounts                 VirtualAccounts?
   virtualPositions                VirtualPositions[]
@@ -390,7 +371,6 @@ model CompetitionParticipants {
 /// existed have none, and unique so two seasons can never share one.
 model Competitions {
   id                              String                            @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  slug                            String?                           @unique
   name                            String
   description                     String?
   startsAt                        DateTime?                         @map("starts_at") @db.Timestamptz(6)
@@ -398,6 +378,7 @@ model Competitions {
   startingCash                    Decimal?                          @default(100000) @map("starting_cash") @db.Decimal
   isActive                        Boolean?                          @default(true) @map("is_active")
   createdAt                       DateTime                          @default(now()) @map("created_at") @db.Timestamptz(6)
+  slug                            String?                           @unique
   competitionLeaderboardSnapshots CompetitionLeaderboardSnapshots[]
   competitionParticipants         CompetitionParticipants[]
 
@@ -465,14 +446,14 @@ model EmailVerificationTokens {
   id        String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   userId    String    @map("user_id") @db.Uuid
   tokenHash String    @unique @map("token_hash")
+  expiresAt DateTime  @map("expires_at") @db.Timestamptz(6)
+  usedAt    DateTime? @map("used_at") @db.Timestamptz(6)
+  createdAt DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
   /// `pending` | `sent` | `failed`.
   status    String    @default("pending")
   /// What the token authorizes, e.g. `email_registration`.
   purpose   String    @default("email_registration")
-  expiresAt DateTime  @map("expires_at") @db.Timestamptz(6)
-  usedAt    DateTime? @map("used_at") @db.Timestamptz(6)
   sentAt    DateTime? @map("sent_at") @db.Timestamptz(6)
-  createdAt DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
   appUsers  AppUsers  @relation(fields: [userId], references: [id], onDelete: Cascade, onUpdate: NoAction)
 
   @@index([tokenHash], map: "email_verification_tokens_hash_idx")
@@ -868,33 +849,30 @@ model RedditAttachments {
 ///
 /// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
 model RedditComments {
-  redditCommentId String    @id @map("reddit_comment_id")
-  redditPostId    String?   @map("reddit_post_id")
+  redditCommentId String       @id @map("reddit_comment_id")
+  redditPostId    String?      @map("reddit_post_id")
   subreddit       String
-  authorHash      String    @map("author_hash")
-  bodyExcerpt     String?   @map("body_excerpt")
-  score           Int       @default(0)
-  redditCreatedAt DateTime? @map("reddit_created_at") @db.Timestamptz(6)
-  createdAt       DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
-
-  // ── Provider provenance (src/providers/reddit/) ───────────────────────────
+  authorHash      String       @map("author_hash")
+  bodyExcerpt     String?      @map("body_excerpt")
+  score           Int          @default(0)
+  redditCreatedAt DateTime?    @map("reddit_created_at") @db.Timestamptz(6)
+  createdAt       DateTime     @default(now()) @map("created_at") @db.Timestamptz(6)
   /// Reddit fullname (`t1_<id>`).
-  fullname   String?
+  fullname        String?
   /// Parent fullname: `t1_…` for a reply, `t3_…` for a top-level comment.
-  parentId   String?   @map("parent_id")
-  permalink  String?
+  parentId        String?      @map("parent_id")
+  permalink       String?
   /// Provider treated as authoritative for this row.
-  source     String?
+  source          String?
   /// Every provider that has returned this record.
-  sources    String[]  @default([])
+  sources         String[]     @default([])
   /// When the row was first captured.
-  fetchedAt  DateTime? @map("fetched_at") @db.Timestamptz(6)
+  fetchedAt       DateTime?    @map("fetched_at") @db.Timestamptz(6)
   /// When a provider last confirmed the record still exists.
-  lastSeenAt DateTime? @map("last_seen_at") @db.Timestamptz(6)
+  lastSeenAt      DateTime?    @map("last_seen_at") @db.Timestamptz(6)
   /// Upstream payload, stored only when REDDIT_STORE_SOURCE_METADATA=true.
-  rawData    Json?     @map("raw_data")
-
-  redditPosts RedditPosts? @relation(fields: [redditPostId], references: [redditPostId], onDelete: Cascade, onUpdate: NoAction)
+  rawData         Json?        @map("raw_data")
+  redditPosts     RedditPosts? @relation(fields: [redditPostId], references: [redditPostId], onDelete: Cascade, onUpdate: NoAction)
 
   @@index([authorHash], map: "reddit_comments_author_idx")
   @@index([redditPostId], map: "reddit_comments_post_idx")
@@ -916,34 +894,31 @@ model RedditComments {
 ///
 /// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
 model RedditPosts {
-  redditPostId    String    @id @map("reddit_post_id")
-  subreddit       String
-  title           String
-  bodyExcerpt     String?   @map("body_excerpt")
-  authorHash      String    @map("author_hash")
-  score           Int       @default(0)
-  numComments     Int       @default(0) @map("num_comments")
-  permalink       String?
-  redditCreatedAt DateTime? @map("reddit_created_at") @db.Timestamptz(6)
-  createdAt       DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
-
-  // ── Provider provenance (src/providers/reddit/) ───────────────────────────
+  redditPostId       String               @id @map("reddit_post_id")
+  subreddit          String
+  title              String
+  bodyExcerpt        String?              @map("body_excerpt")
+  authorHash         String               @map("author_hash")
+  score              Int                  @default(0)
+  numComments        Int                  @default(0) @map("num_comments")
+  permalink          String?
+  redditCreatedAt    DateTime?            @map("reddit_created_at") @db.Timestamptz(6)
+  createdAt          DateTime             @default(now()) @map("created_at") @db.Timestamptz(6)
   /// Reddit fullname (`t3_<id>`).
-  fullname    String?
+  fullname           String?
   /// External link a link-post points at; null for self posts.
-  url         String?
-  upvoteRatio Decimal?  @map("upvote_ratio") @db.Decimal
+  url                String?
+  upvoteRatio        Decimal?             @map("upvote_ratio") @db.Decimal
   /// Provider treated as authoritative for this row.
-  source      String?
+  source             String?
   /// Every provider that has returned this record.
-  sources     String[]  @default([])
+  sources            String[]             @default([])
   /// When the row was first captured.
-  fetchedAt   DateTime? @map("fetched_at") @db.Timestamptz(6)
+  fetchedAt          DateTime?            @map("fetched_at") @db.Timestamptz(6)
   /// When a provider last confirmed the record still exists.
-  lastSeenAt  DateTime? @map("last_seen_at") @db.Timestamptz(6)
+  lastSeenAt         DateTime?            @map("last_seen_at") @db.Timestamptz(6)
   /// Upstream payload, stored only when REDDIT_STORE_SOURCE_METADATA=true.
-  rawData     Json?     @map("raw_data")
-
+  rawData            Json?                @map("raw_data")
   bets               Bets[]
   ddQualityScores    DdQualityScores?
   postSnapshots      PostSnapshots[]
@@ -1057,18 +1032,19 @@ model SocialComments {
   confidence           Decimal?               @db.Decimal
   postedAt             DateTime?              @map("posted_at") @db.Timestamptz(6)
   fetchedAt            DateTime               @default(now()) @map("fetched_at") @db.Timestamptz(6)
-  /// INHERITED from the parent thread, so filtering by subtype needs no join.
-  discussionThreadType String?                @map("discussion_thread_type")
   /// A comment has no link flair of its own; this carries the PARENT post's,
   /// when known, and stays null otherwise rather than inventing one.
   flairText            String?                @map("flair_text")
   redditId             String?                @map("reddit_id")
+  /// INHERITED from the parent thread, so filtering by subtype needs no join.
+  discussionThreadType String?                @map("discussion_thread_type")
   tickerLinks          SocialCommentTickers[]
 
   @@index([subreddit, postedAt(sort: Desc)], map: "social_comments_subreddit_idx")
   @@index([postExternalId, postedAt(sort: Desc)], map: "social_comments_post_external_idx")
   @@index([discussionThreadType, postedAt(sort: Desc)], map: "social_comments_thread_type_idx")
   @@index([tickers], map: "social_comments_tickers_gin", type: Gin)
+  @@index([postedAt(sort: Desc), stance], map: "social_comments_posted_stance_idx")
   @@map("social_comments")
 }
 
@@ -1091,21 +1067,19 @@ model SocialPosts {
   stance               String?
   confidence           Decimal?            @db.Decimal
   isScreenshot         Boolean             @default(false) @map("is_screenshot")
+  postedAt             DateTime?           @map("posted_at") @db.Timestamptz(6)
+  fetchedAt            DateTime            @default(now()) @map("fetched_at") @db.Timestamptz(6)
   /// "REGULAR" | "DAILY_DISCUSSION". Decided once, at ingestion, by
   /// services/social/dailyDiscussion.service.ts — never re-derived from the
   /// title at read time.
   postCategory         String              @default("REGULAR") @map("post_category")
-  /// Which recurring r/wallstreetbets thread this is: DAILY | TOMORROW |
-  /// WEEKEND. Null for everything else. Decided by the worker at ingestion.
-  discussionThreadType String?             @map("discussion_thread_type")
   /// Subreddit link flair, when the source reports one. Null renders no badge.
   flairText            String?             @map("flair_text")
   /// Reddit's own fullname for the item (`t3_1vi969l`).
   redditId             String?             @map("reddit_id")
-  postedAt             DateTime?           @map("posted_at") @db.Timestamptz(6)
-  fetchedAt            DateTime            @default(now()) @map("fetched_at") @db.Timestamptz(6)
-  /// Normalized associations. `tickers` above stays as the GIN-indexed display
-  /// projection of the rows here that clear the confidence threshold.
+  /// Which recurring r/wallstreetbets thread this is: DAILY | TOMORROW |
+  /// WEEKEND. Null for everything else. Decided by the worker at ingestion.
+  discussionThreadType String?             @map("discussion_thread_type")
   tickerLinks          SocialPostTickers[]
 
   @@index([postedAt(sort: Desc)], map: "social_posts_posted_idx")
@@ -1113,6 +1087,7 @@ model SocialPosts {
   @@index([postCategory, subreddit, postedAt(sort: Desc)], map: "social_posts_daily_discussion_idx")
   @@index([discussionThreadType, subreddit, postedAt(sort: Desc)], map: "social_posts_thread_type_idx")
   @@index([tickers], map: "social_posts_tickers_gin", type: Gin)
+  @@index([postedAt(sort: Desc), stance], map: "social_posts_posted_stance_idx")
   @@map("social_posts")
 }
 
@@ -1315,6 +1290,7 @@ model Tickers {
   exchange                   String?
   isActive                   Boolean?                     @default(true) @map("is_active")
   isCommonWord               Boolean?                     @default(false) @map("is_common_word")
+  createdAt                  DateTime                     @default(now()) @map("created_at") @db.Timestamptz(6)
   /// Catalog-level ambiguity, owned by the Nasdaq Trader refresh job and set
   /// from config/tickers/ambiguousTickers.ts. Deliberately NOT the same column
   /// as `isCommonWord`, which belongs to the Reddit extractor and is curated
@@ -1326,13 +1302,12 @@ model Tickers {
   /// Left NULL by the importer: the source only carries the type inside the
   /// security name as prose, and deriving one from that would be a guess.
   securityType               String?                      @map("security_type")
+  updatedAt                  DateTime                     @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
   /// Which directory last supplied this row —
   /// NASDAQ_TRADER_NASDAQ_LISTED | NASDAQ_TRADER_OTHER_LISTED | CBOE_INDEX_DIRECTORY.
   /// Deactivation sweeps are scoped by it: a source may only switch off symbols
   /// from its own universe. NULL means no importer owns the row.
   source                     String?
-  createdAt                  DateTime                     @default(now()) @map("created_at") @db.Timestamptz(6)
-  updatedAt                  DateTime                     @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
   betaAdjustedResults        BetaAdjustedResults[]
   bets                       Bets[]
   ddQualityScores            DdQualityScores[]
@@ -1340,26 +1315,26 @@ model Tickers {
   narrativeTransitions       NarrativeTransitions[]
   pumpCoordinationScores     PumpCoordinationScores[]
   signalScores               SignalScores[]
+  socialCommentTickers       SocialCommentTickers[]
+  socialPostTickers          SocialPostTickers[]
   subredditTickerMetrics1h   SubredditTickerMetrics1h[]
   subredditTickerMetrics5m   SubredditTickerMetrics5m[]
   tickerAlerts               TickerAlerts[]
+  tickerAliases              TickerAliases[]
   tickerDailyMetrics         TickerDailyMetrics[]
   tickerMentions             TickerMentions[]
   tickerMetrics5m            TickerMetrics5m[]
   tickerPositioningIndexes   TickerPositioningIndexes[]
   tickerStanceEvents         TickerStanceEvents[]
-  tickerAliases              TickerAliases[]
   tickerTrendClassifications TickerTrendClassifications[]
-  socialPostTickers          SocialPostTickers[]
-  socialCommentTickers       SocialCommentTickers[]
   virtualPositions           VirtualPositions[]
   virtualTrades              VirtualTrades[]
 
   @@index([exchange, isActive], map: "tickers_exchange_active_idx")
   @@index([source, isActive], map: "tickers_source_active_idx")
-  @@index([securityType], map: "tickers_security_type_idx")
-  @@index([companyName], map: "tickers_company_name_idx")
-  @@index([isAmbiguous], map: "tickers_is_ambiguous_idx")
+  @@index([securityType])
+  @@index([companyName])
+  @@index([isAmbiguous])
   @@index([lastSeenAt(sort: Desc)], map: "tickers_last_seen_idx")
   @@map("tickers")
 }
@@ -1667,13 +1642,38 @@ model RedditIngestionCursor {
   consecutiveFailures  Int       @default(0) @map("consecutive_failures")
   /// The last response filled the page; there is probably more in the window.
   hasMore              Boolean   @default(false) @map("has_more")
+  /// WHICH THREAD this cursor tracks, or "" for the subreddit-level one.
+  ///
+  /// EMPTY STRING, NOT NULL. Postgres treats NULLs as distinct in a unique
+  /// index, so a nullable column here would let the subreddit-level cursor be
+  /// inserted twice — and two cursors for one stream means one of them is
+  /// always behind, re-fetching rows the other already paid for.
+  threadId             String    @default("") @map("thread_id")
+  /// Earliest this stream may be synced again. The scheduler's per-stream gate:
+  /// a quiet thread backs off without needing its own timer.
+  nextSyncAt           DateTime? @map("next_sync_at") @db.Timestamptz(6)
+  /// Consecutive syncs that returned nothing new. Drives the backoff and,
+  /// eventually, `isActive = false`.
+  consecutiveEmptyRuns Int       @default(0) @map("consecutive_empty_runs")
+  /// What the last sync actually cost and yielded. Read by the adaptive
+  /// request sizer: the only cost lever this provider exposes is how many rows
+  /// are asked for, so the next request is sized from the last one's yield.
+  lastRowsReceived     Int       @default(0) @map("last_rows_received")
+  lastNewItems         Int       @default(0) @map("last_new_items")
+  /// 0 = the live megathread, 1 = a busy recent post, 2 = everything else.
+  priority             Int       @default(2)
+  /// False once a thread has gone quiet. A dead thread is never polled again,
+  /// which is what stops the comment sweep growing without bound.
+  isActive             Boolean   @default(true) @map("is_active")
   /// Set after repeated failures — the subreddit is skipped until it passes.
   cooldownUntil        DateTime? @map("cooldown_until") @db.Timestamptz(6)
   createdAt            DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt            DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
 
-  @@unique([provider, subreddit, contentType], map: "reddit_ingestion_cursors_unique")
+  @@unique([provider, subreddit, contentType, threadId], map: "reddit_ingestion_cursors_unique")
   @@index([provider, subreddit], map: "reddit_ingestion_cursors_provider_idx")
+  /// The scheduler's pick query: active streams of one type that are due.
+  @@index([contentType, isActive, priority, nextSyncAt], map: "reddit_ingestion_cursors_due_idx")
   @@map("reddit_ingestion_cursors")
 }
 
@@ -1757,8 +1757,7 @@ model ArenaUserPerformanceSnapshots {
   publicAfter          DateTime @map("public_after") @db.Timestamptz(6)
   isMock               Boolean  @default(false) @map("is_mock")
   createdAt            DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
-
-  appUsers AppUsers @relation(fields: [userId], references: [id], onDelete: Cascade)
+  appUsers             AppUsers @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([period, publicAfter(sort: Desc), rank], map: "arena_user_perf_public_idx")
   @@index([userId, periodStart(sort: Desc)], map: "arena_user_perf_user_idx")
@@ -1793,7 +1792,7 @@ model TickerSocialMetricSnapshots {
   isMock       Boolean  @default(false) @map("is_mock")
   createdAt    DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
 
-  @@unique([ticker, bucketSize, bucketStart], map: "ticker_social_metrics_unique")
+  @@unique([ticker, bucketSize, bucketStart(sort: Desc)], map: "ticker_social_metrics_unique")
   @@index([bucketSize, bucketStart(sort: Desc)], map: "ticker_social_metrics_bucket_idx")
   @@map("ticker_social_metric_snapshots")
 }
@@ -2041,7 +2040,7 @@ model VirtualEquitySnapshots {
   /// True when some position was valued at cost for want of a usable quote.
   isStale              Boolean         @default(false) @map("is_stale")
   createdAt            DateTime        @default(now()) @map("created_at") @db.Timestamptz(6)
-  virtualAccounts      VirtualAccounts @relation(fields: [virtualAccountId], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  virtualAccounts      VirtualAccounts @relation(fields: [virtualAccountId], references: [id], onDelete: Cascade, onUpdate: NoAction, map: "virtual_equity_snapshots_account_fkey")
 
   @@index([virtualAccountId, calculatedAt(sort: Desc)], map: "virtual_equity_snapshots_account_idx")
   @@index([userId, calculatedAt(sort: Desc)], map: "virtual_equity_snapshots_user_idx")
@@ -2055,37 +2054,35 @@ model VirtualEquitySnapshots {
 /// whether the association is shown publicly; `source` and `matchedText` exist
 /// so a false positive can be traced back to the text that produced it.
 model SocialPostTickers {
-  socialPostId String   @map("social_post_id") @db.Uuid
+  socialPostId String      @map("social_post_id") @db.Uuid
   ticker       String
-  confidence   Decimal  @db.Decimal(4, 3)
+  confidence   Decimal     @db.Decimal(4, 3)
   /// "cashtag" | "symbol" | "alias"
   source       String
-  matchedText  String?  @map("matched_text")
-  createdAt    DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
-
-  socialPost SocialPosts @relation(fields: [socialPostId], references: [id], onDelete: Cascade)
-  tickers    Tickers     @relation(fields: [ticker], references: [ticker], onDelete: Cascade)
+  matchedText  String?     @map("matched_text")
+  createdAt    DateTime    @default(now()) @map("created_at") @db.Timestamptz(6)
+  socialPost   SocialPosts @relation(fields: [socialPostId], references: [id], onDelete: Cascade, map: "social_post_tickers_post_fkey")
+  tickers      Tickers     @relation(fields: [ticker], references: [ticker], onDelete: Cascade)
 
   @@id([socialPostId, ticker])
-  @@index([ticker], map: "social_post_tickers_ticker_idx")
+  @@index([ticker])
   @@index([ticker, confidence(sort: Desc)], map: "social_post_tickers_confidence_idx")
   @@map("social_post_tickers")
 }
 
 /// The comment-side equivalent of SocialPostTickers.
 model SocialCommentTickers {
-  socialCommentId String   @map("social_comment_id") @db.Uuid
+  socialCommentId String         @map("social_comment_id") @db.Uuid
   ticker          String
-  confidence      Decimal  @db.Decimal(4, 3)
+  confidence      Decimal        @db.Decimal(4, 3)
   source          String
-  matchedText     String?  @map("matched_text")
-  createdAt       DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
-
-  socialComment SocialComments @relation(fields: [socialCommentId], references: [id], onDelete: Cascade)
-  tickers       Tickers        @relation(fields: [ticker], references: [ticker], onDelete: Cascade)
+  matchedText     String?        @map("matched_text")
+  createdAt       DateTime       @default(now()) @map("created_at") @db.Timestamptz(6)
+  socialComment   SocialComments @relation(fields: [socialCommentId], references: [id], onDelete: Cascade, map: "social_comment_tickers_comment_fkey")
+  tickers         Tickers        @relation(fields: [ticker], references: [ticker], onDelete: Cascade)
 
   @@id([socialCommentId, ticker])
-  @@index([ticker], map: "social_comment_tickers_ticker_idx")
+  @@index([ticker])
   @@map("social_comment_tickers")
 }
 
@@ -2100,9 +2097,179 @@ model TickerAliases {
   ticker          String
   requiresContext Boolean  @default(false) @map("requires_context")
   createdAt       DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  tickers         Tickers  @relation(fields: [ticker], references: [ticker], onDelete: Cascade)
 
-  tickers Tickers @relation(fields: [ticker], references: [ticker], onDelete: Cascade)
-
-  @@index([ticker], map: "ticker_aliases_ticker_idx")
+  @@index([ticker])
   @@map("ticker_aliases")
+}
+
+/// WHAT MINDCASE WAS PAID, PER RESPONSE.
+///
+/// Mindcase bills per ROW RETURNED, not per request — roughly $0.005 each. A
+/// request that returns fifty rows already stored costs exactly as much as one
+/// returning fifty new ones, so counting HTTP requests measures nothing that
+/// appears on the invoice.
+///
+/// This is the ledger the budget guard enforces against, and it is a TABLE
+/// rather than an in-process counter for one reason: a counter resets on every
+/// deploy, and "spend at most $50 today" must survive a deploy or it is not a
+/// limit at all. A crash-loop with an in-memory budget is an unbounded bill.
+///
+/// It also carries the efficiency numbers, because the question that matters is
+/// not "how much did we spend" but "how much did we spend per NEW item" — a
+/// duplicate rate of 90% is a bug report, not a statistic.
+model MindcaseUsageEvent {
+  id        String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  /// "reddit/posts" | "reddit/comments"
+  agent     String
+  community String
+  /// The thread this response was for, or "" for a subreddit-level sweep.
+  threadId  String @default("") @map("thread_id")
+
+  /// THE BILLABLE NUMBER. Everything else here is commentary on it.
+  rowsReceived     Int     @map("rows_received")
+  newItems         Int     @default(0) @map("new_items")
+  duplicateItems   Int     @default(0) @map("duplicate_items")
+  estimatedCostUsd Decimal @map("estimated_cost_usd") @db.Decimal(12, 6)
+
+  durationMs Int?    @map("duration_ms")
+  /// "success" | "error" | "empty". An error still costs whatever it returned.
+  outcome    String  @default("success")
+  error      String?
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  /// The budget query: sum rows and cost over a rolling window.
+  @@index([createdAt(sort: Desc)], map: "mindcase_usage_created_idx")
+  @@index([agent, createdAt(sort: Desc)], map: "mindcase_usage_agent_idx")
+  @@map("mindcase_usage_events")
+}
+
+/// PRE-AGGREGATED REDDIT ATTENTION — the table Top Tickers and Hot Tickers read.
+///
+/// Ranking "what is being talked about" used to mean scanning
+/// `social_post_tickers` + `social_comment_tickers`, joining each row to its
+/// parent for `posted_at`/`stance`, TWICE per request (current window and
+/// comparison window). Cost grew with the corpus rather than with the window.
+///
+/// Here the work is done ONCE, at ingestion, into fixed 5-minute buckets.
+///
+/// NO FOREIGN KEY TO `tickers`, deliberately: the extractor only emits
+/// catalog-validated symbols, and a catalog refresh that retires one must never
+/// be able to make Reddit aggregation writes start failing.
+model TickerActivity {
+  id            BigInt   @id @default(autoincrement())
+  ticker        String
+  subreddit     String
+  bucketStart   DateTime @map("bucket_start") @db.Timestamptz(6)
+  bucketMinutes Int      @default(5) @map("bucket_minutes")
+
+  mentions      Int @default(0)
+  posts         Int @default(0)
+  comments      Int @default(0)
+  bullish       Int @default(0)
+  neutral       Int @default(0)
+  bearish       Int @default(0)
+  /// Maintained by counting rows in `ticker_activity_authors`, never by
+  /// incrementing per mention — see that model.
+  uniqueAuthors Int @default(0) @map("unique_authors")
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  @@unique([ticker, subreddit, bucketStart, bucketMinutes], map: "ticker_activity_bucket_uniq")
+  @@index([subreddit, bucketStart(sort: Desc)], map: "ticker_activity_subreddit_idx")
+  @@index([ticker, bucketStart(sort: Desc)], map: "ticker_activity_ticker_idx")
+  @@index([bucketStart(sort: Desc)], map: "ticker_activity_bucket_idx")
+  @@map("ticker_activity")
+}
+
+/// WHICH AUTHORS APPEAR IN A BUCKET — why `uniqueAuthors` is a count, not a
+/// running total. `uniqueAuthors++` per mention would report one account
+/// posting forty times about NVDA as forty interested people, inverting the one
+/// signal that separates broad interest from a single loud poster.
+///
+/// The insert is `ON CONFLICT DO NOTHING` and the counter advances only when a
+/// row was actually created, so the unique index arbitrates between concurrent
+/// workers without a lock. `author_hash` only — no Reddit username is stored.
+model TickerActivityAuthors {
+  ticker        String
+  subreddit     String
+  bucketStart   DateTime @map("bucket_start") @db.Timestamptz(6)
+  bucketMinutes Int      @default(5) @map("bucket_minutes")
+  authorHash    String   @map("author_hash")
+  createdAt     DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  @@id([ticker, subreddit, bucketStart, bucketMinutes, authorHash])
+  @@index([bucketStart], map: "ticker_activity_authors_bucket_idx")
+  @@map("ticker_activity_authors")
+}
+
+/// THE MARKET-DATA WORK QUEUE — the only thing that makes Databento run on
+/// demand. A row is a REQUEST, not a promise: the worker decides when, batches
+/// what it can, and no read path waits for one.
+///
+/// Postgres rather than Redis: the one guarantee needed is that two workers
+/// cannot claim the same row, and `FOR UPDATE SKIP LOCKED` provides it.
+///
+/// TEXT + CHECK rather than a Postgres enum, matching the rest of this schema.
+model MarketDataJob {
+  id       String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  ticker   String
+  /// QUOTE | SNAPSHOT | CANDLES
+  jobType  String @map("job_type")
+  /// 1 = realtime (someone is looking at it) … 4 = background. Lower is sooner.
+  priority Int    @default(3)
+  /// PENDING | PROCESSING | DONE | FAILED
+  status   String @default("PENDING")
+
+  /// Candle interval and range. Empty for QUOTE/SNAPSHOT.
+  params Json @default("{}")
+
+  requestedAt   DateTime  @default(now()) @map("requested_at") @db.Timestamptz(6)
+  startedAt     DateTime? @map("started_at") @db.Timestamptz(6)
+  processedAt   DateTime? @map("processed_at") @db.Timestamptz(6)
+  /// Set on a retryable failure. The job is invisible to the claim query until
+  /// this passes, which gives the queue backoff without a scheduler.
+  nextAttemptAt DateTime? @map("next_attempt_at") @db.Timestamptz(6)
+  attempts      Int       @default(0)
+  error         String?
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  @@index([status, priority, requestedAt], map: "market_data_jobs_claim_idx")
+  @@index([ticker, jobType, status], map: "market_data_jobs_dedupe_idx")
+  @@index([status, nextAttemptAt], map: "market_data_jobs_retry_idx")
+  @@map("market_data_jobs")
+}
+
+/// HISTORICAL BARS, CACHED — so a closed candle is bought from Databento once.
+///
+/// A candle for a period that has ended never changes, yet the candles endpoint
+/// went straight to the provider on every request behind a ten-second memory
+/// cache that every deploy erased.
+///
+/// The primary key is what makes filling idempotent: the worker can re-request
+/// an overlapping range and overwrite the same rows.
+model MarketCandle {
+  ticker    String
+  /// 1m | 5m | 15m | 1h | 1d — the provider's bar width, stored as written.
+  interval  String
+  /// The bar's OPEN time, UTC. Half-open [timestamp, timestamp + interval).
+  timestamp DateTime @db.Timestamptz(6)
+
+  open   Decimal? @db.Decimal
+  high   Decimal? @db.Decimal
+  low    Decimal? @db.Decimal
+  close  Decimal? @db.Decimal
+  volume Decimal? @db.Decimal
+
+  provider  String?
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  @@id([ticker, interval, timestamp])
+  @@index([ticker, interval, timestamp(sort: Desc)], map: "market_candles_lookup_idx")
+  @@map("market_candles")
 }
