@@ -14,6 +14,14 @@
 # migration. It is not run automatically here so a deploy can never alter the
 # schema on its own. `npm run prisma:status` reports whether the database is up
 # to date.
+#
+# BUILD DEPENDENCIES: `npm run build` (prisma generate && tsc) runs HERE, on the
+# deploy host, with NODE_ENV=production set above. npm omits devDependencies in
+# that case, so everything the build needs -- typescript, prisma and every
+# @types/* package -- lives in "dependencies", not "devDependencies". Moving
+# them back breaks the build with a few hundred "Cannot find name 'console'" /
+# "Could not find a declaration file for module 'express'" errors. Only tsx
+# (tests and the local dev:* scripts) is a real devDependency.
 
 services:
   - type: web
