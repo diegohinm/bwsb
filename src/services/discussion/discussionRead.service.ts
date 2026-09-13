@@ -24,6 +24,7 @@ import {
   toPreview,
   toSentiment,
   type DiscussionComment,
+  type DiscussionCommentContext,
   type DiscussionPost,
 } from "../../realtime/discussionEvents.js";
 
@@ -310,11 +311,113 @@ export function normalizePost(
   };
 }
 
+/**
+ * Resolve a page of comments to their parent post and parent comment.
+ *
+ * TWO QUERIES FOR THE WHOLE PAGE, never one per row. A feed page holds ~25
+ * comments; resolving each one individually would turn a single feed request
+ * into fifty round trips against a pooled connection, which is how a read path
+ * that "only does a small join" becomes the slowest thing in the product.
+ *
+ * NOTHING HERE CALLS A PROVIDER. Both lookups are local reads against content
+ * already ingested. A parent that was never ingested resolves to null and the
+ * client omits that line — the one thing this must never do is fetch from
+ * Reddit to fill a gap, because that would put an upstream request on a user
+ * action.
+ *
+ * The post side matches on `reddit_id` with its prefix stripped as well as on
+ * `external_id`, because those two disagree for historical rows: content stored
+ * by the metered provider carries a content-hash `external_id` and the real
+ * Reddit id only in `reddit_id`. Matching on one alone silently finds nothing
+ * for everything ingested before the archive migration.
+ */
+export async function resolveCommentContext(
+  rows: readonly CommentRow[],
+): Promise<Map<string, DiscussionCommentContext>> {
+  const out = new Map<string, DiscussionCommentContext>();
+  if (rows.length === 0) return out;
+
+  const postIds = [...new Set(rows.map((r) => r.postExternalId).filter((v): v is string => !!v))];
+  const parentIds = [
+    ...new Set(rows.map((r) => r.parentCommentId).filter((v): v is string => !!v)),
+  ];
+
+  const [posts, parents] = await Promise.all([
+    postIds.length > 0
+      ? prisma.socialPosts.findMany({
+          where: {
+            OR: [
+              { externalId: { in: postIds } },
+              { redditId: { in: postIds.map((id) => `t3_${id}`) } },
+            ],
+          },
+          select: { externalId: true, redditId: true, title: true, url: true, body: true },
+        })
+      : Promise.resolve([]),
+    parentIds.length > 0
+      ? prisma.socialComments.findMany({
+          where: { externalId: { in: parentIds } },
+          select: {
+            externalId: true,
+            authorHash: true,
+            body: true,
+            url: true,
+            redditId: true,
+          },
+        })
+      : Promise.resolve([]),
+  ]);
+
+  // Index by BOTH keys so a lookup succeeds whichever convention the row used.
+  const postByKey = new Map<string, (typeof posts)[number]>();
+  for (const post of posts) {
+    postByKey.set(post.externalId, post);
+    const bare = post.redditId?.replace(/^t\d_/, "");
+    if (bare) postByKey.set(bare, post);
+  }
+
+  const parentByKey = new Map(parents.map((c) => [c.externalId, c]));
+
+  for (const row of rows) {
+    const post = row.postExternalId ? postByKey.get(row.postExternalId) : undefined;
+    const parent = row.parentCommentId ? parentByKey.get(row.parentCommentId) : undefined;
+
+    out.set(row.externalId, {
+      // An empty title is not a title. Posts store "" when the source had none,
+      // and rendering a "POST:" line with nothing after it is worse than none.
+      postTitle: post?.title && post.title.trim().length > 0 ? post.title : null,
+      postUrl: post ? canonicalRedditUrl(resolvePermalink(post.url, post.body)) : null,
+      parent: parent
+        ? {
+            id: parent.externalId,
+            author: toAuthorHandle(parent.authorHash),
+            preview: toPreview(parent.body),
+            redditUrl: canonicalCommentUrl(
+              resolvePermalink(parent.url, parent.body),
+              post ? canonicalRedditUrl(resolvePermalink(post.url, post.body)) : null,
+              parent.redditId,
+            ),
+          }
+        : null,
+    });
+  }
+
+  return out;
+}
+
+/** The context of a comment whose parents were not resolved. */
+export const EMPTY_COMMENT_CONTEXT: DiscussionCommentContext = {
+  postTitle: null,
+  postUrl: null,
+  parent: null,
+};
+
 export function normalizeComment(
   row: CommentRow,
   symbol: string,
   tickers: TickerBadge[] = [],
   parentUrl: string | null = null,
+  context: DiscussionCommentContext = EMPTY_COMMENT_CONTEXT,
 ): DiscussionComment {
   return {
     id: row.externalId,
@@ -322,6 +425,10 @@ export function normalizeComment(
     // Null unless the source recorded the parent — reported honestly rather
     // than guessed from the URL.
     postId: row.postExternalId,
+    // Resolved by `resolveCommentContext` for a whole page at once. Defaults to
+    // all-null rather than throwing, so a caller that has not resolved context
+    // renders a comment without it instead of failing the request.
+    context,
     subreddit: row.subreddit ?? "",
     author: toAuthorHandle(row.authorHash),
     preview: toPreview(row.body),
@@ -439,15 +546,43 @@ export async function findLatestDailyDiscussionThread(
       postedAt: { gte: since },
     },
     orderBy: { postedAt: "desc" },
-    select: { externalId: true, title: true, postedAt: true, fetchedAt: true },
+    select: {
+      externalId: true,
+      redditId: true,
+      title: true,
+      postedAt: true,
+      fetchedAt: true,
+    },
   });
   if (!row) return null;
 
   return {
-    postId: row.externalId,
+    // THE REDDIT ID, NOT THE ROW'S external_id.
+    //
+    // This is what comments actually point at. `social_comments.post_external_id`
+    // holds the parent's BARE Reddit id, while `social_posts.external_id` holds
+    // whatever the ingesting provider used as its key — and for everything
+    // collected by the metered provider that is a CONTENT HASH (`mc_…`), not a
+    // Reddit id at all. Returning `external_id` therefore produced a thread
+    // identifier that no comment could ever match, and the Daily Discussion feed
+    // silently returned zero rows while thousands of its comments sat in the
+    // table. Measured on the live database: 0 comments matched the megathread's
+    // `external_id`, 1,952 matched its bare `reddit_id`.
+    //
+    // The fallback is not dead code: content ingested from the archive keys
+    // `external_id` on the bare Reddit id already, so the two agree there and
+    // either value works.
+    postId: bareRedditId(row.redditId) ?? row.externalId,
     title: row.title ?? "",
     createdAt: (row.postedAt ?? row.fetchedAt).toISOString(),
   };
+}
+
+/** `t3_1wdr1cq` → `1wdr1cq`. The form a comment's `post_external_id` uses. */
+function bareRedditId(value: string | null | undefined): string | null {
+  if (!value) return null;
+  const bare = value.replace(/^t\d_/, "").trim();
+  return bare.length > 0 ? bare : null;
 }
 
 /**
@@ -589,6 +724,11 @@ export async function readGlobalDiscussion(
     badgesForComments(commentRows.map((r) => r.id), DISPLAY_THRESHOLD),
   ]);
 
+  // Parent post + parent comment for the whole page in two queries. Resolved
+  // HERE rather than in the client, so a comment arrives already readable and
+  // no user action can trigger a lookup.
+  const commentContext = await resolveCommentContext(commentRows);
+
   const items: FeedItem[] = [
     ...postRows.map((r) => ({
       kind: "post" as const,
@@ -596,7 +736,13 @@ export async function readGlobalDiscussion(
     })),
     ...commentRows.map((r) => ({
       kind: "comment" as const,
-      ...normalizeComment(r, primary(r.tickers), commentBadges.get(r.id) ?? []),
+      ...normalizeComment(
+        r,
+        primary(r.tickers),
+        commentBadges.get(r.id) ?? [],
+        null,
+        commentContext.get(r.externalId) ?? EMPTY_COMMENT_CONTEXT,
+      ),
     })),
   ];
 
@@ -684,9 +830,17 @@ export async function readDiscussion(query: DiscussionQuery): Promise<Discussion
     badgesForComments(commentRows.map((r) => r.id), DISPLAY_THRESHOLD),
   ]);
 
+  const commentContext = await resolveCommentContext(commentRows);
+
   const posts = postRows.map((r) => normalizePost(r, symbol, postBadges.get(r.id) ?? []));
   const comments = commentRows.map((r) =>
-    normalizeComment(r, symbol, commentBadges.get(r.id) ?? []),
+    normalizeComment(
+      r,
+      symbol,
+      commentBadges.get(r.id) ?? [],
+      null,
+      commentContext.get(r.externalId) ?? EMPTY_COMMENT_CONTEXT,
+    ),
   );
 
   const providers = [

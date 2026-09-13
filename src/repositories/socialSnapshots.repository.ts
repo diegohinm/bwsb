@@ -111,6 +111,8 @@ export async function saveSocialItems(
           // when the source could not attribute it — never overwritten with
           // null on update, so an attribution learned later is not lost.
           postExternalId: it.postExternalId ?? null,
+          // NULL for a top-level comment by design — see the column comment.
+          parentCommentId: it.parentCommentId ?? null,
           body: it.text ?? null,
           url: it.url ?? null,
           authorHash: it.authorHash ?? null,
@@ -137,6 +139,9 @@ export async function saveSocialItems(
           flairText: it.flair ?? undefined,
           redditId: it.redditId ?? undefined,
           postExternalId: it.postExternalId ?? undefined,
+          // `undefined` skips the field, so a parent learned later is filled in
+          // while a top-level comment is never overwritten back to null.
+          parentCommentId: it.parentCommentId ?? undefined,
           fetchedAt: new Date(),
         },
       });

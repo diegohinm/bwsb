@@ -226,6 +226,21 @@ export function commentToSocialItem(
   // nothing and the Daily Discussion tab would stay empty.
   const parent = threadId ?? (comment.postId.length > 0 ? comment.postId : undefined);
 
+  // WHICH COMMENT THIS ONE ANSWERS.
+  //
+  // Reddit's `parent_id` is type-prefixed, and the prefix IS the meaning:
+  //
+  //     t3_<id>  the parent is the POST    → a top-level comment
+  //     t1_<id>  the parent is a COMMENT   → a reply
+  //
+  // Only the `t1_` case is recorded. Storing the `t3_` id here would make every
+  // top-level comment look like a reply to something that is not a comment,
+  // and thread membership is already carried by `postExternalId`.
+  const rawParent = comment.parentId ?? "";
+  const parentCommentId = rawParent.startsWith("t1_")
+    ? rawParent.slice(3)
+    : undefined;
+
   return {
     id: comment.externalId,
     provider: "arctic_shift",
@@ -243,6 +258,7 @@ export function commentToSocialItem(
     confidence: cls.confidence,
     isScreenshot: cls.isScreenshot,
     ...(parent ? { postExternalId: parent } : {}),
+    ...(parentCommentId ? { parentCommentId } : {}),
     ...(comment.fullname ? { redditId: comment.fullname } : {}),
     // Flair is deliberately absent: a comment inherits its thread's
     // classification after persistence rather than carrying its own.

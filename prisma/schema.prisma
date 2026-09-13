@@ -1022,6 +1022,15 @@ model SocialComments {
   source               String?
   subreddit            String?
   postExternalId       String?                @map("post_external_id")
+  /// The comment this one REPLIES to, as a bare Reddit id.
+  ///
+  /// NULL for a top-level comment by design: Reddit's `parent_id` carries a
+  /// type prefix, and `t3_` means the parent is the POST itself, which is
+  /// thread membership and already lives in `post_external_id`. Only a `t1_`
+  /// parent — an actual comment — is recorded here.
+  ///
+  /// Bare, to match `external_id`, which is what it is joined against.
+  parentCommentId      String?                @map("parent_comment_id")
   body                 String?
   url                  String?
   authorHash           String?                @map("author_hash")
@@ -1042,6 +1051,8 @@ model SocialComments {
 
   @@index([subreddit, postedAt(sort: Desc)], map: "social_comments_subreddit_idx")
   @@index([postExternalId, postedAt(sort: Desc)], map: "social_comments_post_external_idx")
+  /// Resolving a page of comments to their parents, and counting replies.
+  @@index([parentCommentId], map: "social_comments_parent_comment_idx")
   @@index([discussionThreadType, postedAt(sort: Desc)], map: "social_comments_thread_type_idx")
   @@index([tickers], map: "social_comments_tickers_gin", type: Gin)
   @@index([postedAt(sort: Desc), stance], map: "social_comments_posted_stance_idx")

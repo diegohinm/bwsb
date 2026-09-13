@@ -10,6 +10,7 @@ import {
   getWsbOptionPositions,
   getWsbPortfolioSummary,
   getWsbStockPositions,
+  getBanbetOverview,
 } from "../services/wsb/wsbRead.service.js";
 import {
   BANBET_SECTIONS,
@@ -174,6 +175,25 @@ wsbRouter.get(
     const ticker = firstString(req.query.ticker)?.trim().toUpperCase() || undefined;
 
     const { data, meta } = await getBanbetActivity({ section, page, limit, ticker, side });
+    return res.json({ data, meta });
+  }),
+);
+
+/**
+ * GET /api/wsb/banbets/overview — every Overview panel in one response.
+ *
+ * Public, read-only, and entirely pre-aggregated: the client renders what it is
+ * given and computes no statistic of its own. Seven panels that always appear
+ * together travel as one payload rather than seven requests.
+ *
+ * Thin or empty sections are a normal response, not an error — a corpus that is
+ * still being indexed returns real zeroes, and the client shows empty states
+ * rather than inventing rows.
+ */
+wsbRouter.get(
+  "/wsb/banbets/overview",
+  asyncHandler(async (_req, res) => {
+    const { data, meta } = await getBanbetOverview();
     return res.json({ data, meta });
   }),
 );

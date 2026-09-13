@@ -114,6 +114,18 @@ export interface SocialPostItem {
    * it for every item, so the title patterns remain the fallback.
    */
   flair?: string;
+  /**
+   * For a COMMENT, the bare Reddit id of the comment it REPLIES to.
+   *
+   * Undefined on a post, and undefined on a TOP-LEVEL comment — Reddit's
+   * `parent_id` is `t3_…` there, meaning the parent is the thread itself, which
+   * `postExternalId` already records. Only a `t1_…` parent is a real comment.
+   *
+   * Carried so the Discussion feed can show what a reply is answering. Without
+   * it a comment reading "exactly, and the guidance proves it" is unreadable
+   * without leaving the app, which is the entire problem the comments view has.
+   */
+  parentCommentId?: string;
   /** Reddit's own fullname (`t3_1vi969l`), used to build comment permalinks. */
   redditId?: string;
   /** A link the post points OUT to. Never the thread's own permalink. */

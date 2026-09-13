@@ -1,7 +1,12 @@
 import { prisma } from "../lib/prisma.js";
 import { env } from "../config/env.js";
 import { discussionHub } from "./discussionHub.js";
-import { normalizeComment, normalizePost } from "../services/discussion/discussionRead.service.js";
+import {
+  EMPTY_COMMENT_CONTEXT,
+  normalizeComment,
+  normalizePost,
+  resolveCommentContext,
+} from "../services/discussion/discussionRead.service.js";
 import {
   badgesForComments,
   badgesForPosts,
@@ -142,9 +147,13 @@ class DatabaseChangeSource {
     // given it — otherwise an item gains its tickers only after a refresh, and
     // the feed contradicts itself while the reader is watching. Two queries per
     // poll, regardless of how many rows changed.
-    const [postBadges, commentBadges] = await Promise.all([
+    const [postBadges, commentBadges, commentContext] = await Promise.all([
       badgesForPosts(posts.map((p) => p.id), DISPLAY_THRESHOLD),
       badgesForComments(comments.map((c) => c.id), DISPLAY_THRESHOLD),
+      // Same parent resolution the REST path does, for the same reason: a
+      // comment that arrives live must be as readable as one that was fetched,
+      // or the feed contradicts itself while the reader is watching it.
+      resolveCommentContext(comments),
     ]);
 
     const at = new Date().toISOString();
@@ -183,7 +192,15 @@ class DatabaseChangeSource {
         type,
         ticker,
         at,
-        comment: normalizeComment(row, ticker, commentBadges.get(row.id) ?? []),
+        // Live rows carry the same resolved context as a page fetch, so a
+        // comment that streams in is as readable as one that was loaded.
+        comment: normalizeComment(
+          row,
+          ticker,
+          commentBadges.get(row.id) ?? [],
+          null,
+          commentContext.get(row.externalId) ?? EMPTY_COMMENT_CONTEXT,
+        ),
       }));
     }
 

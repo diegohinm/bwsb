@@ -11,6 +11,9 @@ import {
   readBanbetsMeta,
   readExpiringBanbets,
   readResolvedBanbets,
+  readBanbetSummary,
+  readBanbetTopTickers,
+  readBanbetExtremes,
 } from "../../repositories/wsbBanbets.repository.js";
 import { bucketForFilter } from "./optionDuration.service.js";
 import type {
@@ -187,6 +190,90 @@ export async function getBanbetActivity(params: {
       ? { provider: meta.provider, source: meta.source, isMock: meta.isMock, updatedAt: meta.updatedAt }
       : EMPTY_META,
   };
+  memoryCache.set(key, result, READ_CACHE_SECONDS);
+  return result;
+}
+
+/**
+ * THE OVERVIEW DASHBOARD — one request, every panel.
+ *
+ * Seven panels on one screen would otherwise be seven round trips that always
+ * arrive together, so they are assembled here and cached as a unit. Every
+ * figure comes from a database aggregate over the whole table, never from the
+ * rows a panel happens to display.
+ *
+ * Panels are LIMITED to what the dashboard shows (five rows each). "View all"
+ * links to the dedicated tabs, which page properly — this endpoint is
+ * deliberately not a paging surface.
+ */
+/**
+ * Resolved banbets a user needs before they are ranked at all.
+ *
+ * Shared by the Overview panel and the Leaderboard tab so the two can never
+ * disagree about who counts as established.
+ */
+export const MIN_LEADERBOARD_BETS = 5;
+
+export async function getBanbetOverview(): Promise<{
+  data: {
+    summary: Awaited<ReturnType<typeof readBanbetSummary>>;
+    active: import("./wsb.types.js").WsbBanbet[];
+    recentlyResolved: import("./wsb.types.js").WsbBanbet[];
+    topTickers: Awaited<ReturnType<typeof readBanbetTopTickers>>;
+    topUsers: Awaited<ReturnType<typeof readBanbetLeaderboard>>;
+    biggestGains: Awaited<ReturnType<typeof readBanbetExtremes>>["gains"];
+    biggestLosses: Awaited<ReturnType<typeof readBanbetExtremes>>["losses"];
+  };
+  meta: WsbResponseMeta;
+}> {
+  const key = "wsb-banbets-overview";
+  const cached = memoryCache.get<Awaited<ReturnType<typeof getBanbetOverview>>>(key);
+  if (cached) return cached;
+
+  const PANEL_ROWS = 5;
+
+  const [summary, active, recentlyResolved, topTickers, topUsers, extremes, meta] =
+    await Promise.all([
+      readBanbetSummary(),
+      // Nearest deadline first — the ordering lives in the query, so it cannot
+      // drift with whatever the client decides to sort by.
+      readExpiringBanbets({ limit: PANEL_ROWS, skip: 0 }),
+      readResolvedBanbets({ limit: PANEL_ROWS, skip: 0 }),
+      readBanbetTopTickers(PANEL_ROWS),
+      // The minimum sample size is enforced below, not here: the query returns
+      // ranked users and the floor is a presentation rule about who is
+      // COMPARABLE, which the dashboard and the Leaderboard tab must share.
+      readBanbetLeaderboard(PANEL_ROWS * 4),
+      readBanbetExtremes(PANEL_ROWS),
+      readBanbetsMeta(),
+    ]);
+
+  const result = {
+    data: {
+      summary,
+      active,
+      recentlyResolved,
+      topTickers,
+      // MINIMUM SAMPLE SIZE. One lucky call is not a record, and a user with a
+      // single win would otherwise sit at 100% above everyone who has actually
+      // played. Applied to RESOLVED bets, because an open bet has proved
+      // nothing yet.
+      topUsers: topUsers
+        .filter((u) => u.resolved >= MIN_LEADERBOARD_BETS)
+        .slice(0, PANEL_ROWS),
+      biggestGains: extremes.gains,
+      biggestLosses: extremes.losses,
+    },
+    meta: meta
+      ? {
+          provider: meta.provider,
+          source: meta.source,
+          isMock: meta.isMock,
+          updatedAt: meta.updatedAt,
+        }
+      : EMPTY_META,
+  };
+
   memoryCache.set(key, result, READ_CACHE_SECONDS);
   return result;
 }

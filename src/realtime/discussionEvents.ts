@@ -72,11 +72,47 @@ export interface DiscussionPost {
   createdAt: string;
 }
 
+/**
+ * The context a comment needs to be readable on its own.
+ *
+ * A comment lifted out of its thread is frequently meaningless — "exactly, and
+ * the guidance proves it" says nothing without the post it sits under and the
+ * remark it answers. Both are resolved server-side and sent with the row, so
+ * the client renders context rather than assembling it, and no user action ever
+ * triggers a lookup.
+ *
+ * Every field is nullable and means "not recorded" rather than "none": a
+ * comment ingested before the parent chain was captured, or whose parent is not
+ * itself stored, simply renders without that line.
+ */
+export interface DiscussionCommentContext {
+  /** The thread's title. Null when the parent post is not stored. */
+  postTitle: string | null;
+  /** The post's own permalink, so the context line can be opened directly. */
+  postUrl: string | null;
+  /**
+   * The comment being replied to. Null for a top-level comment — whose parent
+   * IS the post — and null when the parent comment was never ingested.
+   */
+  parent: {
+    id: string;
+    author: string;
+    preview: string;
+    redditUrl: string | null;
+  } | null;
+}
+
 export interface DiscussionComment {
   id: string;
   ticker: string;
   /** The post this comment belongs to, when the source recorded it. */
   postId: string | null;
+  /**
+   * Resolved parent context. Always present as an object; its fields are null
+   * when the corresponding parent is unknown, so the client branches on the
+   * FIELD rather than on the container.
+   */
+  context: DiscussionCommentContext;
   subreddit: string;
   author: string;
   preview: string;

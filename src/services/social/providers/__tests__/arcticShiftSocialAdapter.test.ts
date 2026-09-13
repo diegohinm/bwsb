@@ -302,6 +302,61 @@ describe("comment mapping", () => {
     }
   });
 
+  it("records the parent COMMENT for a reply", async () => {
+    // parent_id = t1_… means the parent is another comment. This is the field
+    // that makes a reply readable in the feed without opening Reddit.
+    const fetch = stubFetch(() => ({
+      body: { data: [rawComment({ parent_id: "t1_p9estkx" })] },
+    }));
+    try {
+      const { items } = await source().fetchComments({
+        community: COMMUNITY,
+        after: null,
+        limit: 10,
+      });
+      assert.equal(items[0]?.parentCommentId, "p9estkx", "bare id, to match external_id");
+    } finally {
+      fetch.restore();
+    }
+  });
+
+  it("records NO parent comment for a top-level comment", async () => {
+    // parent_id = t3_… means the parent is the POST itself. Storing that id as a
+    // parent COMMENT would make every top-level comment look like a reply to
+    // something that is not a comment — and thread membership is already
+    // carried by postExternalId.
+    const fetch = stubFetch(() => ({
+      body: { data: [rawComment({ parent_id: "t3_1wdr1cq" })] },
+    }));
+    try {
+      const { items } = await source().fetchComments({
+        community: COMMUNITY,
+        after: null,
+        limit: 10,
+      });
+      assert.equal(items[0]?.parentCommentId, undefined);
+      assert.equal(items[0]?.postExternalId, "1wdr1cq", "the thread is still recorded");
+    } finally {
+      fetch.restore();
+    }
+  });
+
+  it("records no parent comment when the archive omits parent_id", async () => {
+    const fetch = stubFetch(() => ({
+      body: { data: [rawComment({ parent_id: undefined })] },
+    }));
+    try {
+      const { items } = await source().fetchComments({
+        community: COMMUNITY,
+        after: null,
+        limit: 10,
+      });
+      assert.equal(items[0]?.parentCommentId, undefined);
+    } finally {
+      fetch.restore();
+    }
+  });
+
   it("drops an empty-bodied comment", async () => {
     const fetch = stubFetch(() => ({ body: { data: [rawComment({ body: "" })] } }));
     try {
