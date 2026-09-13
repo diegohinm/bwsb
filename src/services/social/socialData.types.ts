@@ -29,6 +29,16 @@ export function isPulseTimeframe(value: unknown): value is PulseTimeframe {
 export type SocialDataProviderName =
   | "mock"
   | "mindcase"
+  /**
+   * The free public Reddit archive, and the PRIMARY ingestion source.
+   *
+   * It is named here rather than only in the provider layer because ingested
+   * rows carry their origin into `social_posts.provider` / `social_comments
+   * .provider`, and a row whose provider cannot be named is a row whose cost
+   * cannot be attributed. The database column is a plain nullable string, so
+   * widening this union needs no migration.
+   */
+  | "arctic_shift"
   | "brandwatch"
   | "reddit_official";
 

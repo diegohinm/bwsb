@@ -45,6 +45,46 @@ const POSTS_PATH = "/api/posts/search";
 const COMMENTS_PATH = "/api/comments/search";
 /** Arctic Shift caps a single search response at 100 records. */
 const PAGE_SIZE = 100;
+
+/**
+ * The columns the incremental sync actually reads, passed as `fields` so the
+ * archive returns a few hundred bytes per record instead of the ~4 KB full
+ * Reddit object. Verified against the live API: every name below is accepted,
+ * and an unknown one is a hard 400 rather than a silent omission.
+ *
+ * `permalink` is DELIBERATELY ABSENT because the API rejects it as a field
+ * (so are `name` and `ups`). Nothing is lost: normalizeRedditData rebuilds the
+ * permalink from the subreddit and the id, and the fullname from the id plus
+ * its `t3_`/`t1_` prefix.
+ */
+const POST_FIELDS = [
+  "id",
+  "created_utc",
+  "author",
+  "subreddit",
+  "title",
+  "selftext",
+  "url",
+  "link_flair_text",
+  "score",
+  "num_comments",
+  // Not displayed. This is the archive's own record of WHEN it indexed the
+  // item, and `retrieved_on - created_utc` is the lag the fallback policy
+  // decides on. Without it lag is unmeasurable and the policy is a guess.
+  "retrieved_on",
+].join(",");
+
+const COMMENT_FIELDS = [
+  "id",
+  "created_utc",
+  "author",
+  "subreddit",
+  "body",
+  "link_id",
+  "parent_id",
+  "score",
+  "retrieved_on",
+].join(",");
 /** Hard ceiling on requests per fetch call — a runaway paginator backstop. */
 const MAX_PAGES = 20;
 const DEFAULT_LIMIT = 100;
@@ -64,6 +104,21 @@ export interface ArcticShiftPage {
   after: Date | undefined;
   before: Date | undefined;
   limit: number;
+}
+
+/** One page of comments. Mirrors ArcticShiftPage so the router can treat both alike. */
+export interface ArcticShiftCommentPage {
+  comments: NormalizedRedditComment[];
+  receivedCount: number;
+  hasMore: boolean;
+  after: Date | undefined;
+  before: Date | undefined;
+  limit: number;
+}
+
+export interface ArcticShiftCommentPageInput extends ArcticShiftPageInput {
+  /** Restrict to one thread. A `t3_` fullname; omit for a subreddit-wide sweep. */
+  linkId?: string;
 }
 
 export interface ArcticShiftPageInput {
@@ -172,6 +227,7 @@ export class ArcticShiftProvider implements RedditDataProvider {
       subreddit,
       limit: String(limit),
       sort,
+      fields: POST_FIELDS,
       ...(input.after ? { after: toEpochSeconds(input.after) } : {}),
       ...(input.before ? { before: toEpochSeconds(input.before) } : {}),
     });
@@ -201,6 +257,86 @@ export class ArcticShiftProvider implements RedditDataProvider {
       receivedCount: records.length,
       // A full page means the window was truncated. The worker resumes from the
       // last stored post on this subreddit's NEXT turn — never immediately.
+      hasMore: records.length >= limit,
+      after: input.after,
+      before: input.before,
+      limit,
+    };
+  }
+
+  /**
+   * ONE request for comments. The comment-stream twin of `fetchPostsPage`.
+   *
+   * WHY THIS EXISTS RATHER THAN `fetchComments`. That method always routes
+   * through `paginate`, which is hard-coded to `sort: "desc"` and walks
+   * backwards up to MAX_PAGES times — so a single "sync tick" could become
+   * twenty HTTP requests against a free community service, and would walk away
+   * from the checkpoint instead of forward from it. Incremental sync needs the
+   * opposite: exactly one request, ascending from a known point.
+   *
+   * SUBREDDIT-WIDE BY DEFAULT, and that is the point. `linkId` narrows to a
+   * single thread, but leaving it off returns new comments across the WHOLE
+   * community in one request — verified against the live API. That is what
+   * makes a one-minute cadence cost one request instead of one per tracked
+   * thread, and it is why the thread-rotation machinery is no longer needed to
+   * keep the comment stream affordable.
+   *
+   * Failures throw; the CALLER decides what a failure means. Never an
+   * immediate retry — that is what turns one failed tick into a burst.
+   */
+  async fetchCommentsPage(
+    input: ArcticShiftCommentPageInput,
+  ): Promise<ArcticShiftCommentPage> {
+    assertProviderCallsAllowed("Arctic Shift");
+
+    const subreddit = cleanSubreddit(input.subreddit);
+    if (!subreddit) {
+      throw new RedditProviderError(
+        this.name,
+        "client",
+        "fetchCommentsPage requires a subreddit.",
+      );
+    }
+
+    const limit = Math.max(1, Math.min(PAGE_SIZE, Math.trunc(input.limit ?? PAGE_SIZE)));
+    const sort = input.sort ?? "asc";
+    const linkId = input.linkId ? toFullname(input.linkId, "t3") : null;
+
+    const url = this.buildUrl(COMMENTS_PATH, {
+      subreddit,
+      limit: String(limit),
+      sort,
+      fields: COMMENT_FIELDS,
+      ...(linkId ? { link_id: linkId } : {}),
+      ...(input.after ? { after: toEpochSeconds(input.after) } : {}),
+      ...(input.before ? { before: toEpochSeconds(input.before) } : {}),
+    });
+
+    const fetchedAt = new Date();
+    const response = await trackProviderCall(this.name, () =>
+      requestJson<ArcticShiftResponse>({
+        provider: this.name,
+        url,
+        timeoutMs: input.timeoutMs ?? this.timeoutMs,
+        // Single-request, like fetchPostsPage: no retries, so no backoff.
+        maxRetries: 0,
+        retryDelayMs: 0,
+        label: COMMENTS_PATH,
+      }),
+    );
+
+    const records = extractRecords(response);
+    const comments = normalizeComments(records, normalizeArcticShiftComment, {
+      subreddit,
+      fetchedAt,
+    });
+
+    return {
+      comments,
+      receivedCount: records.length,
+      // A full page means the window was truncated and more is waiting. The
+      // caller pages forward from the newest record it saw, bounded by its own
+      // per-sync page budget.
       hasMore: records.length >= limit,
       after: input.after,
       before: input.before,

@@ -55,6 +55,28 @@ export function boundsForComments(): SizingBounds {
 }
 
 /**
+ * The archive's page cap. Its search endpoints refuse anything larger — a
+ * request for 101 is rejected outright rather than silently clamped.
+ */
+export const ARCHIVE_PAGE_SIZE = 100;
+
+/**
+ * Request size for a FREE source: always the maximum.
+ *
+ * THE ADAPTIVE SIZER ABOVE IS A COST CONTROL, and applying it here would be
+ * exactly backwards. Its whole premise is that every returned row is billed, so
+ * a page that comes back mostly duplicates means money wasted and the next
+ * request should shrink. On a source that charges nothing, shrinking buys
+ * nothing and costs something real: a smaller page means the same backlog needs
+ * more round trips to clear, so the stream stays behind for longer and issues
+ * MORE requests to catch up. The scarce resource here is requests, not rows,
+ * and a full page is the cheapest way to spend one.
+ */
+export function boundsForArchive(): SizingBounds {
+  return { min: ARCHIVE_PAGE_SIZE, max: ARCHIVE_PAGE_SIZE };
+}
+
+/**
  * Headroom over the last sync's yield.
  *
  * Asking for exactly what arrived last time guarantees saturation on any

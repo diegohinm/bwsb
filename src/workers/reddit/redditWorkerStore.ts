@@ -240,6 +240,10 @@ export const prismaRedditWorkerStore: RedditWorkerStore = {
       WHERE provider = ${provider}
         AND subreddit = ${subreddit}
         AND content_type = ${contentType}
+        -- The SUBREDDIT-LEVEL cursor only. Thread-scoped rows share the first
+        -- three columns, so without this a rows[0] pick could return one of
+        -- them and rewind this worker to an unrelated window.
+        AND thread_id = ''
     `;
     const record = rows[0];
     return record ? toCursorRow(record) : null;
@@ -247,9 +251,9 @@ export const prismaRedditWorkerStore: RedditWorkerStore = {
 
   async recordCursorAttempt(provider, subreddit, contentType, at) {
     await prisma.$executeRaw`
-      INSERT INTO reddit_ingestion_cursors (provider, subreddit, content_type, last_attempt_at)
-      VALUES (${provider}, ${subreddit}, ${contentType}, ${at})
-      ON CONFLICT (provider, subreddit, content_type)
+      INSERT INTO reddit_ingestion_cursors (provider, subreddit, content_type, thread_id, last_attempt_at)
+      VALUES (${provider}, ${subreddit}, ${contentType}, '', ${at})
+      ON CONFLICT (provider, subreddit, content_type, thread_id)
       DO UPDATE SET last_attempt_at = ${at}, updated_at = now()
     `;
   },
@@ -259,15 +263,15 @@ export const prismaRedditWorkerStore: RedditWorkerStore = {
     // with indexing lag must never have its window skipped forward to "now".
     await prisma.$executeRaw`
       INSERT INTO reddit_ingestion_cursors (
-        provider, subreddit, content_type, last_created_at, last_external_id,
+        provider, subreddit, content_type, thread_id, last_created_at, last_external_id,
         last_successful_sync_at, has_more, consecutive_failures,
         last_error_code, last_error_message, cooldown_until
       )
       VALUES (
-        ${provider}, ${subreddit}, ${contentType}, ${update.lastCreatedAt},
+        ${provider}, ${subreddit}, ${contentType}, '', ${update.lastCreatedAt},
         ${update.lastExternalId}, ${update.syncedAt}, ${update.hasMore}, 0, NULL, NULL, NULL
       )
-      ON CONFLICT (provider, subreddit, content_type)
+      ON CONFLICT (provider, subreddit, content_type, thread_id)
       DO UPDATE SET
         last_created_at = COALESCE(${update.lastCreatedAt}, reddit_ingestion_cursors.last_created_at),
         last_external_id = COALESCE(${update.lastExternalId}, reddit_ingestion_cursors.last_external_id),
@@ -285,14 +289,14 @@ export const prismaRedditWorkerStore: RedditWorkerStore = {
     const cooldownUntil = update.cooldownUntil ?? null;
     await prisma.$executeRaw`
       INSERT INTO reddit_ingestion_cursors (
-        provider, subreddit, content_type, last_attempt_at,
+        provider, subreddit, content_type, thread_id, last_attempt_at,
         last_error_code, last_error_message, consecutive_failures, cooldown_until
       )
       VALUES (
-        ${provider}, ${subreddit}, ${contentType}, ${update.attemptedAt},
+        ${provider}, ${subreddit}, ${contentType}, '', ${update.attemptedAt},
         ${update.errorCode}, ${update.errorMessage}, 1, ${cooldownUntil}
       )
-      ON CONFLICT (provider, subreddit, content_type)
+      ON CONFLICT (provider, subreddit, content_type, thread_id)
       DO UPDATE SET
         last_attempt_at = ${update.attemptedAt},
         last_error_code = ${update.errorCode},

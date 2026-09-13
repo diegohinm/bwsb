@@ -430,6 +430,95 @@ const envSchema = z.object({
    */
   REDDIT_THREAD_IDLE_RUNS: intEnv(5, 1, 100),
 
+  // ── Arctic Shift: the primary source ───────────────────────────────────────
+  // The free public archive. It supports a real server-side `after`, so its
+  // requests are genuinely incremental rather than "fetch the newest N and
+  // discard what we already have" - which is why it can be primary and the
+  // metered provider cannot.
+
+  /**
+   * Seconds of overlap re-requested around the Arctic Shift checkpoint.
+   *
+   * NOT COSMETIC. `after` is EXCLUSIVE upstream (verified against the live
+   * API: querying `after=T` omits the item whose timestamp is exactly `T`), and
+   * the archive routinely returns several items sharing one second. Asking for
+   * strictly-greater-than the checkpoint therefore drops every sibling of the
+   * checkpoint item, permanently. The overlap re-requests a small window and
+   * de-duplication by Reddit id removes the repeats - which costs nothing here,
+   * because this source does not bill per row.
+   */
+  ARCTIC_SHIFT_OVERLAP_SECONDS: intEnv(30, 0, 3_600),
+
+  /**
+   * How far behind the archive may fall before the fallback takes over.
+   *
+   * Measured as the median of `retrieved_on - created_utc` across a page - what
+   * the archive itself says about its own indexing delay - never as the age of
+   * the newest item. The latter conflates a lagging archive with a quiet
+   * community and would hand a metered provider the overnight hours on a
+   * perfectly healthy feed.
+   */
+  ARCTIC_SHIFT_MAX_LAG_MINUTES: intEnv(10, 1, 1_440),
+
+  /**
+   * Consecutive failures before the fallback takes over.
+   *
+   * THREE, not one. An isolated timeout or a single 5xx is normal operation for
+   * any network call, and switching to a metered provider on the first one
+   * would make every transient blip cost money. The counter lives on the cursor
+   * row, so it survives a restart - a crash-looping worker cannot forget that
+   * the primary is unhealthy and re-authorize spend on every boot.
+   */
+  ARCTIC_SHIFT_FAILURE_THRESHOLD: intEnv(3, 1, 100),
+
+  /**
+   * How long the primary stays benched before it is probed again.
+   *
+   * The probe is one free request. If it succeeds the fallback stops
+   * immediately; if it fails the bench is renewed. Recovery therefore needs no
+   * operator action and cannot be forgotten.
+   */
+  ARCTIC_SHIFT_RECOVERY_PROBE_MINUTES: intEnv(5, 1, 1_440),
+
+  /**
+   * Pages one Arctic Shift sync may walk.
+   *
+   * Bounds catch-up. A worker that was off for hours has a backlog wider than
+   * one 100-row page, and must work it off across consecutive ticks rather than
+   * in one unbounded loop - the cap is what makes "catch up" terminate. Higher
+   * than the metered cap because these pages are free; the limit here protects
+   * a free community service and the tick duration, not a budget.
+   */
+  ARCTIC_SHIFT_MAX_PAGES_PER_SYNC: intEnv(5, 1, 50),
+
+  /**
+   * The furthest back a COLD START is allowed to reach.
+   *
+   * WHY THERE HAS TO BE A FLOOR. The archive is ordered ascending and its
+   * `after` is optional, so a first run with no checkpoint and no floor asks for
+   * "the oldest content in this community" — and cheerfully begins ingesting the
+   * subreddit from the year it was founded, one slow page at a time. That is not
+   * a hypothetical: it is what happens, and the rows land in the same tables the
+   * product reads.
+   *
+   * So a checkpoint older than this — or no checkpoint at all — is treated as no
+   * usable position, and the window starts at the recent look-back instead.
+   * Resuming after a normal outage still works, because a real gap is hours at
+   * most; anything wider is a BACKFILL, which is a deliberate operation and not
+   * something a routine tick should start on its own.
+   */
+  ARCTIC_SHIFT_MAX_CATCHUP_HOURS: intEnv(24, 1, 8_760),
+
+  /**
+   * Whether the metered provider may be used as a fallback at all.
+   *
+   * FALSE is a valid, safe production choice: with it off, an Arctic Shift
+   * outage PAUSES ingestion instead of spending money. The API keeps serving
+   * everything already in Postgres either way, so the cost of pausing is
+   * staleness, never an error.
+   */
+  MINDCASE_FALLBACK_ENABLED: boolFromString(true),
+
   // ── Budget guard ───────────────────────────────────────────────────────────
   // SAFETY LIMITS, NOT SPEND TARGETS. They exist so a bug cannot produce an
   // unbounded invoice. Crossing one pauses INGESTION only — the API, Discussion,

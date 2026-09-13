@@ -248,16 +248,23 @@ export function startSchedulers(): void {
       run: refreshMarketMovers,
       initialDelayMs: 5_000,
     }),
-    // ── THE MINDCASE INGESTION PAIR ──────────────────────────────────────────
+    // ── THE REDDIT INGESTION PAIR ────────────────────────────────────────────
     //
-    // These two are the ONLY scheduled things that spend money on Reddit data.
-    // Both are WSB-only (redditConfig.ingestionCommunities), both check the
-    // budget before their first request, and both size each request from what
-    // the previous one actually yielded.
+    // These two are the ONLY scheduled things that collect Reddit data, and the
+    // only ones that COULD spend money on it. Which upstream they actually use
+    // is not decided here and is not decided by them: each asks the source
+    // router, which serves the free archive while it is healthy and reaches the
+    // metered provider only after repeated failures or excessive archive lag.
+    //
+    // That indirection is the fix for a specific bug. These jobs used to
+    // resolve their own provider from the social-data factory, so the free
+    // archive could be configured as the Reddit source while every scheduled
+    // run still went to the metered client — two settings, both readable as
+    // authoritative, and the expensive one winning silently.
     //
     // Registered ONCE, here. A second registration would silently double the
-    // bill, which is why the startup banner prints the cadence: two identical
-    // lines in one boot is the symptom.
+    // request rate, which is why the startup banner prints the routing policy:
+    // two identical lines in one boot is the symptom.
     startJobLoop({
       name: "syncRedditPosts",
       intervalSeconds: env.REDDIT_POSTS_INTERVAL_MINUTES * 60,
@@ -364,13 +371,27 @@ export function startSchedulers(): void {
     );
   }
 
-  // Arctic Shift: its own paced loop, NOT a job on an interval.
+  // The paced Arctic Shift loop — SUPERSEDED, and off by default.
   //
-  // It owns the global budget of one request every five minutes, so it cannot
-  // share the generic scheduler with the multi-subreddit ingestion job — the
-  // two together would multiply requests by the number of communities. When it
-  // is on, it REPLACES that job as the Reddit path.
+  // It predates the source router and solves the same problem a different way:
+  // a round-robin across every TRACKED subreddit at one request per five
+  // minutes, writing posts only, into `reddit_posts` — a table no product
+  // surface reads. It never wrote comments at all.
+  //
+  // It is now redundant AND actively harmful if left on: the sync jobs above
+  // already collect the active community from the same archive, incrementally
+  // and into the tables the product actually reads, so running both means two
+  // independent things fetching the same subreddit on different schedules —
+  // the double ingestion this migration exists to remove.
+  //
+  // Kept behind its flag rather than deleted because it is still the only way
+  // to run a paced multi-subreddit backfill, which is a real (manual) need.
   if (arcticShiftWorkerConfig.enabled) {
+    console.warn(
+      "[worker] ⚠ ARCTIC_SHIFT_ENABLED=true starts the LEGACY paced loop IN ADDITION to the " +
+        "scheduled Reddit sync jobs. Both fetch the same community from the same archive. " +
+        "Set ARCTIC_SHIFT_ENABLED=false unless you are deliberately running a backfill.",
+    );
     arcticShiftWorker = buildArcticShiftWorker();
     console.log(
       `[worker] arctic_shift paced loop: 1 request / ${redditConfig.pollIntervalMs / 1000}s across ` +
@@ -391,8 +412,8 @@ export function startSchedulers(): void {
     if (env.REDDIT_INGESTION_ENABLED) {
       console.warn(
         "[worker] ⚠ REDDIT_INGESTION_ENABLED=true is IGNORED while ARCTIC_SHIFT_ENABLED=true: " +
-          "the paced Arctic Shift loop is the Reddit ingestion path, and running both would " +
-          "break the one-request-per-five-minutes guarantee.",
+          "the legacy provider-layer ingestion and the paced loop would both fetch the same " +
+          "subreddits, and neither writes the tables the product reads.",
       );
     }
   } else if (env.REDDIT_INGESTION_ENABLED) {

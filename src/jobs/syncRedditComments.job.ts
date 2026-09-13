@@ -7,17 +7,29 @@ import {
 import { prisma } from "../lib/prisma.js";
 import { isMainModule, runJobAsScript, type JobMetadata } from "../lib/jobRunner.js";
 import { getUsMarketSessionStatus } from "../services/market/usMarketCalendar.js";
-import { getSocialDataProvider } from "../services/social/socialDataProvider.factory.js";
-import { budgetAllowsSpending } from "../services/reddit/mindcaseBudget.service.js";
-import { boundsForComments, intervalForPriority } from "../services/reddit/redditSyncPlan.js";
+import {
+  boundsForArchive,
+  boundsForComments,
+  intervalForPriority,
+} from "../services/reddit/redditSyncPlan.js";
 import {
   commentIntervalMs,
   logSync,
-  PROVIDER,
   runSync,
+  runSyncUntilCurrent,
 } from "../services/reddit/redditSync.service.js";
+import {
+  benchPrimaryIfLagging,
+  decisionIsPaused,
+  fetchForSource,
+  FALLBACK_SOURCE,
+  overlapSecondsFor,
+  PRIMARY_SOURCE,
+  primaryFailurePolicy,
+  resolveSourceFor,
+} from "../services/reddit/redditSourceRouter.js";
+import { meteredRedditFetcher } from "../services/reddit/meteredRedditFetcher.js";
 import { DAILY_DISCUSSION_WINDOW_HOURS } from "../services/social/dailyDiscussion.service.js";
-import type { SocialPostItem } from "../services/social/socialData.types.js";
 
 /**
  * WORKER JOB — incremental comment sync.
@@ -28,11 +40,20 @@ import type { SocialPostItem } from "../services/social/socialData.types.js";
  * What actually happens per minute is a small request against the handful of
  * threads people are currently writing in, sized from what the last one yielded.
  *
- * WHY BY THREAD. Mindcase bills per row returned and its comments agent takes a
- * URL. A subreddit-scoped crawl returns whatever it finds across every thread,
- * most of it from conversations nobody is reading — paid for at the same rate as
- * the megathread. Naming the thread is what makes a one-minute cadence
- * affordable at all.
+ * TWO SHAPES, BECAUSE THE TWO SOURCES BILL DIFFERENTLY.
+ *
+ * The PRIMARY archive is free and supports an ascending, community-wide `after`
+ * query, so one request per tick returns every new comment in the community
+ * regardless of which thread it landed in. That is both cheaper — one request
+ * instead of one per thread — and strictly more complete, because it cannot
+ * miss a conversation that was never picked for a rotation.
+ *
+ * The METERED fallback bills per row and its comments agent takes a thread URL,
+ * so a community-wide crawl there would return whatever the crawler found
+ * across every thread, most of it from conversations nobody is reading, at the
+ * same price per row as the megathread. Naming the thread is what makes a
+ * one-minute cadence affordable on that path — so the rotation below survives
+ * as the FALLBACK shape only.
  *
  * PRIORITIES, because not every thread deserves every minute:
  *   P0  the live Daily / Tomorrow / Weekend megathread — every tick
@@ -42,15 +63,6 @@ import type { SocialPostItem } from "../services/social/socialData.types.js";
  * entirely (see redditSyncPlan.shouldRetire). Without that the sweep would grow
  * without bound as threads accumulate, and the bill with it.
  */
-
-type CommentFetcher = {
-  name: string;
-  fetchThreadComments?: (params: {
-    subreddit: string;
-    threadId: string;
-    maxResults: number;
-  }) => Promise<SocialPostItem[]>;
-};
 
 type CommentTarget = {
   community: string;
@@ -75,6 +87,7 @@ export async function selectCommentTargets(
   community: string,
   limit: number,
   now = new Date(),
+  provider: string = FALLBACK_SOURCE,
 ): Promise<CommentTarget[]> {
   const since = new Date(now.getTime() - DAILY_DISCUSSION_WINDOW_HOURS * 3_600_000);
 
@@ -105,7 +118,7 @@ export async function selectCommentTargets(
       take: limit * 4,
     }),
     prisma.redditIngestionCursor.findMany({
-      where: { provider: PROVIDER, subreddit: community, contentType: "COMMENTS" },
+      where: { provider, subreddit: community, contentType: "COMMENTS" },
       select: { threadId: true, nextSyncAt: true, isActive: true },
     }),
   ]);
@@ -178,7 +191,7 @@ export async function syncRedditComments(): Promise<JobMetadata> {
 
   if (!canRunRedditIngestion()) {
     console.warn(
-      "[reddit-ingestion] SKIPPED — runtime config unavailable; no Mindcase requests made.",
+      "[reddit-ingestion] SKIPPED — runtime config unavailable; no upstream requests made.",
     );
     return {
       status: "skipped",
@@ -192,39 +205,116 @@ export async function syncRedditComments(): Promise<JobMetadata> {
     return { status: "skipped", reason: "no active communities" };
   }
 
-  const budget = await budgetAllowsSpending();
-  if (!budget.allowed) {
-    console.warn(
-      `[reddit/comments sync] SKIPPED — ${budget.reason}. ` +
-        `Ingestion is paused; the API keeps serving stored data.`,
-    );
-    return {
-      status: "skipped",
-      reason: budget.reason,
-      rowsToday: budget.rowsToday,
-      costTodayUsd: budget.costTodayUsd,
-    };
-  }
-
-  const provider = getSocialDataProvider() as unknown as CommentFetcher;
-  if (typeof provider.fetchThreadComments !== "function") {
-    // Not an error: a provider without a comments agent simply contributes no
-    // comments, and posts ingestion carries on untouched.
-    return { status: "skipped", reason: `${provider.name} has no comments agent` };
-  }
-  const fetchThreadComments = provider.fetchThreadComments.bind(provider);
-
   let rowsReceived = 0;
   let newItems = 0;
   let duplicates = 0;
   let estimatedCostUsd = 0;
   let threadsSynced = 0;
+  let lagSeconds: number | null = null;
   const touchedThreads: string[] = [];
+  const sources: string[] = [];
+  const paused: string[] = [];
+  const policy = primaryFailurePolicy();
 
   for (const community of communities) {
-    const targets = await selectCommentTargets(community, env.REDDIT_COMMENT_THREADS_PER_SYNC);
+    // ONE decision per community per tick, read from durable state. The budget
+    // check for the metered path happens inside this call, before that provider
+    // could ever be reached.
+    const communityResource = { community, stream: "COMMENTS" as const, threadId: "" };
+    const decision = await resolveSourceFor(communityResource);
+
+    if (decisionIsPaused(decision)) {
+      console.warn(
+        `[reddit/comments sync] PAUSED community=${community} reason=${decision.reason}. ` +
+          `No upstream request made; the API keeps serving stored data.`,
+      );
+      paused.push(community);
+      continue;
+    }
+    sources.push(decision.source);
+
+    if (decision.source === PRIMARY_SOURCE) {
+      // ── FREE, COMMUNITY-WIDE ────────────────────────────────────────────
+      // One ascending request from the checkpoint returns every new comment in
+      // the community. No thread selection, no per-thread cursors, no priority
+      // rotation and no idle retirement: all of that machinery exists to bound
+      // the number of BILLED requests, and there is nothing to bound here. It
+      // is also strictly more complete — a thread that never made the rotation
+      // still has its comments collected.
+      const pages = await runSyncUntilCurrent({
+        community,
+        contentType: "COMMENTS",
+        threadId: "",
+        priority: 0,
+        // The community-level comment stream is never retired: it is the only
+        // thing collecting comments at all, so letting it go quiet overnight
+        // would end comment ingestion until a restart.
+        isProtected: true,
+        baseIntervalMs: intervalMs,
+        // Free source: always a full page. See boundsForArchive.
+        bounds: boundsForArchive(),
+        source: decision.source,
+        overlapSeconds: overlapSecondsFor(decision.source),
+        failureThreshold: policy.failureThreshold,
+        cooldownMs: policy.cooldownMs,
+        // Market-open bursts and post-downtime backlog both exceed one page.
+        maxPages: env.ARCTIC_SHIFT_MAX_PAGES_PER_SYNC,
+        fetch: (maxResults, window) =>
+          fetchForSource({
+            decision,
+            resource: communityResource,
+            maxResults,
+            window,
+            deps: { metered: meteredRedditFetcher },
+          }),
+      });
+
+      let storedAny = false;
+      for (const result of pages) {
+        logSync("comments", market.isRegularSessionOpen, result);
+        if (result.lagSeconds !== null) lagSeconds = result.lagSeconds;
+        rowsReceived += result.rowsReceived;
+        newItems += result.newItems;
+        duplicates += result.duplicates;
+        threadsSynced += 1;
+        if (result.storedComments > 0) storedAny = true;
+      }
+
+      const last = pages[pages.length - 1];
+      if (last && !last.error) {
+        await benchPrimaryIfLagging({
+          resource: communityResource,
+          lagSeconds: last.lagSeconds,
+        });
+      }
+
+      // A community-wide sweep does not know which threads it touched, so every
+      // recently-active thread is offered to the inheritance pass. That query is
+      // scoped to rows still missing the value, so a wider list costs nothing.
+      if (storedAny) {
+        const recent = await selectCommentTargets(community, 25, new Date(), PRIMARY_SOURCE);
+        touchedThreads.push(...recent.map((t) => t.threadId));
+      }
+      continue;
+    }
+
+    // ── METERED FALLBACK, PER THREAD ──────────────────────────────────────
+    // Retained unchanged: this agent takes a thread URL and bills per row, so
+    // the rotation and its priority scaling are what keep the fallback from
+    // costing more than the outage it is covering.
+    const targets = await selectCommentTargets(
+      community,
+      env.REDDIT_COMMENT_THREADS_PER_SYNC,
+      new Date(),
+      FALLBACK_SOURCE,
+    );
 
     for (const target of targets) {
+      const resource = {
+        community: target.community,
+        stream: "COMMENTS" as const,
+        threadId: target.threadId,
+      };
       const result = await runSync({
         community: target.community,
         contentType: "COMMENTS",
@@ -237,11 +327,15 @@ export async function syncRedditComments(): Promise<JobMetadata> {
         // number, for conversations producing a comment every few minutes.
         baseIntervalMs: intervalForPriority(intervalMs, target.priority),
         bounds: boundsForComments(),
-        fetch: (maxResults) =>
-          fetchThreadComments({
-            subreddit: target.community,
-            threadId: target.threadId,
+        source: decision.source,
+        overlapSeconds: overlapSecondsFor(decision.source),
+        fetch: (maxResults, window) =>
+          fetchForSource({
+            decision,
+            resource,
             maxResults,
+            window,
+            deps: { metered: meteredRedditFetcher },
           }),
       });
 
@@ -268,6 +362,9 @@ export async function syncRedditComments(): Promise<JobMetadata> {
   return {
     ...(quiet ? { status: "success_without_change" as const } : {}),
     communities,
+    sources,
+    ...(paused.length > 0 ? { paused } : {}),
+    ...(lagSeconds !== null ? { archiveLagSeconds: lagSeconds } : {}),
     marketOpen: market.isRegularSessionOpen,
     marketHoliday: market.holiday,
     intervalMinutes: intervalMs / 60_000,

@@ -36,6 +36,26 @@ export type MetricName =
   | "mindcase_sync_skipped_budget_total"
   | "mindcase_sync_skipped_overlap_total"
   | "mindcase_sync_skipped_boundary_total"
+  // ── Arctic Shift ─────────────────────────────────────────────────────────
+  // The free archive that replaced Mindcase as the primary source. These exist
+  // to make the SAVING provable rather than asserted: during healthy operation
+  // the arctic_* counters move and every mindcase_* counter stays flat at zero.
+  // Any movement on a mindcase_* counter is the fallback alarm, not noise.
+  | "arctic_shift_requests_total"
+  | "arctic_shift_posts_received_total"
+  | "arctic_shift_comments_received_total"
+  | "arctic_shift_new_items_total"
+  | "arctic_shift_duplicate_items_total"
+  | "arctic_shift_errors_total"
+  // ── Provider routing ─────────────────────────────────────────────────────
+  // A point-in-time "which provider is active" cannot prove what happened over
+  // a window, so occupancy is counted per cycle as well. `increment` can only
+  // ADD, so a 0/1 flag counter is impossible — two counters is the shape that
+  // works with this module's constraints.
+  | "reddit_fallback_activations_total"
+  | "reddit_fallback_recoveries_total"
+  | "reddit_cycles_served_by_arctic_shift_total"
+  | "reddit_cycles_served_by_mindcase_total"
   // ── Reddit pipeline ──────────────────────────────────────────────────────
   | "reddit_items_processed"
   | "reddit_mentions_created"
@@ -92,6 +112,49 @@ export function readMindcaseCost(): number {
   return estimatedMindcaseCostUsd;
 }
 
+/**
+ * Archive lag, in seconds, observed on the most recent Arctic Shift fetch.
+ *
+ * A GAUGE, not a counter: the question it answers is "how far behind is the
+ * archive right now", and a sum of every lag ever observed answers nothing.
+ * `increment` can only add, so this cannot live in `counters` — it follows the
+ * `estimatedMindcaseCostUsd` pattern instead: a module-level `let`, a
+ * last-write-wins setter, and injection into `snapshot()` under a key that is
+ * deliberately NOT a member of `MetricName`.
+ *
+ * Null until the first measurement, which is different from zero — "never
+ * fetched" and "perfectly current" must not read the same.
+ */
+let arcticShiftLagSeconds: number | null = null;
+
+export function setArcticShiftLagSeconds(seconds: number): void {
+  arcticShiftLagSeconds = seconds;
+}
+
+export function readArcticShiftLagSeconds(): number | null {
+  return arcticShiftLagSeconds;
+}
+
+/**
+ * Which provider Reddit ingestion is currently served by.
+ *
+ * A STRING, so it cannot be a counter — `MetricsSnapshot.counters` is
+ * `Record<string, number>`. It is surfaced as a top-level snapshot field beside
+ * `uptimeSeconds`, which is where the health route already spreads non-numeric
+ * values.
+ */
+let redditActiveProvider: "arctic_shift" | "mindcase" | "none" = "none";
+
+export function setRedditActiveProvider(
+  provider: "arctic_shift" | "mindcase" | "none",
+): void {
+  redditActiveProvider = provider;
+}
+
+export function readRedditActiveProvider(): string {
+  return redditActiveProvider;
+}
+
 export function observeDuration(name: string, ms: number): void {
   const prev = durations.get(name) ?? { totalMs: 0, count: 0 };
   durations.set(name, { totalMs: prev.totalMs + ms, count: prev.count + 1 });
@@ -116,6 +179,10 @@ export type MetricsSnapshot = {
   durations: Record<string, { count: number; totalMs: number; avgMs: number }>;
   /** Seconds this process has been counting. Counters are meaningless without it. */
   uptimeSeconds: number;
+  /** `arctic_shift` | `mindcase` | `none`. A string, so never a counter. */
+  redditActiveProvider: string;
+  /** Archive lag of the last Arctic Shift fetch. Null before the first one. */
+  arcticShiftLagSeconds: number | null;
 };
 
 export function snapshot(): MetricsSnapshot {
@@ -123,6 +190,8 @@ export function snapshot(): MetricsSnapshot {
     counters: {},
     durations: {},
     uptimeSeconds: Math.round(process.uptime()),
+    redditActiveProvider,
+    arcticShiftLagSeconds,
   };
   for (const [k, v] of counters) out.counters[k] = v;
   // Rounded to a tenth of a cent: more precision than that is noise, less would
@@ -144,4 +213,9 @@ export function resetMetrics(): void {
   counters.clear();
   durations.clear();
   estimatedMindcaseCostUsd = 0;
+  // The gauge and the provider string are module-level `let`s, so a test that
+  // did not clear them here would leak state into the next test in the same
+  // file — they share one process per file under the node test runner.
+  arcticShiftLagSeconds = null;
+  redditActiveProvider = "none";
 }

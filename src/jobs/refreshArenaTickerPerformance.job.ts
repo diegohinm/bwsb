@@ -38,6 +38,8 @@ type Item = {
   stance: string | null;
   authorHash: string | null;
   tickers: string[];
+  /** Which upstream produced this row. Reported as the ranking's provenance. */
+  provider: string | null;
 };
 
 type Agg = {
@@ -66,6 +68,7 @@ async function readItems(sinceIso: string, subreddits: readonly string[]): Promi
     stance: true,
     authorHash: true,
     tickers: true,
+    provider: true,
   } as const;
 
   const [posts, comments] = await Promise.all([
@@ -211,7 +214,18 @@ async function buildScope(
     .slice(0, TOP_N);
 
   const cutoff = publicPriceCutoff(now);
-  const providerSocial = items.length > 0 ? "mindcase" : null;
+  // PROVENANCE COMES FROM THE ROWS, never from a literal.
+  //
+  // This was hardcoded to the metered provider's name, which was accurate only
+  // for as long as that provider was the only one writing. It is precisely the
+  // wrong thing to guess: the label exists so a cost audit can tell which
+  // upstream produced a ranking, and a hardcoded answer tells that audit what
+  // it already assumed. Distinct values are joined rather than collapsed so a
+  // window spanning a fallback period says so instead of picking a winner.
+  const providerSocial =
+    items.length > 0
+      ? [...new Set(items.map((i) => i.provider).filter(Boolean))].sort().join(",") || null
+      : null;
   const windows = await priceWindows(
     top.map((a) => a.symbol),
     start,
