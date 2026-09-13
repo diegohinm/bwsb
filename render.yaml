@@ -19,7 +19,6 @@ services:
   - type: web
     name: bwsb-api
     runtime: node
-    rootDir: bwsb
     plan: starter
     buildCommand: npm ci && npx prisma generate && npm run build
     startCommand: npm run start
@@ -41,6 +40,10 @@ services:
         sync: false
       - key: APP_SESSION_SECRET
         generateValue: true
+      # Shared secret for worker -> API realtime events.
+      # Set the SAME value on bwsb-api and bwsb-worker in Render.
+      - key: WORKER_INTERNAL_SECRET
+        sync: false
       # Must match the worker's value: this side decides which sessions the API
       # will serve and which ?session= values it rejects.
       - key: ENABLE_EXTENDED_HOURS
@@ -56,7 +59,6 @@ services:
   - type: worker
     name: bwsb-worker
     runtime: node
-    rootDir: bwsb
     plan: starter
     buildCommand: npm ci && npx prisma generate && npm run build
     startCommand: npm run worker
@@ -70,6 +72,12 @@ services:
       - key: SUPABASE_URL
         sync: false
       - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+      # Worker -> API realtime bridge. WORKER_INTERNAL_SECRET must match API.
+      - key: WORKER_INTERNAL_SECRET
+        sync: false
+      # Public Render URL of bwsb-api, e.g. https://bwsb-api.onrender.com
+      - key: API_INTERNAL_URL
         sync: false
 
       # ── Social ingestion (Mindcase) ──────────────────────────────────────
