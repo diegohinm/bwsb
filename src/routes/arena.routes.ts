@@ -3,7 +3,6 @@ import { Router } from "express";
 import { asyncHandler } from "../lib/response.js";
 import { requireAuth } from "../middleware/requireAuth.js";
 import {
-  readLeaderboard,
   readMyPerformance,
   readSummary,
   readTickerRanking,
@@ -68,22 +67,15 @@ arenaRouter.get("/arena/tickers/wsb", tickerRoute("wallstreetbets"));
 arenaRouter.get("/arena/tickers/all", tickerRoute("all"));
 
 /**
- * GET /api/arena/leaderboard?period=daily&page=1&limit=20
+ * The virtual-trading leaderboard that used to live at
+ * `GET /api/arena/leaderboard` is GONE from this router.
  *
- * Public. Returns only snapshots whose publication delay has elapsed, and only
- * public profile fields. `meta` reports how many users are registered versus
- * actually rankable, so the page can be honest about the difference instead of
- * scoring inactive accounts at 0%.
+ * The Arena is a prediction contest now: that path is served by
+ * yoloArena.routes, which ranks banbets and YOLOPulse bets by YOLO Score.
+ * Leaving the old handler registered would have meant two handlers racing for
+ * one path, with the winner decided by mount order — the sort of thing that
+ * works until someone reorders the imports.
  */
-arenaRouter.get(
-  "/arena/leaderboard",
-  asyncHandler(async (req, res) => {
-    const period = readPeriod(req.query.period);
-    const { page, limit } = pagination(req.query, 20);
-    const { rows, meta } = await readLeaderboard(period, page, limit);
-    return res.json({ data: rows, meta });
-  }),
-);
 
 /** GET /api/arena/summary?period=daily — the overview cards. Public. */
 arenaRouter.get(

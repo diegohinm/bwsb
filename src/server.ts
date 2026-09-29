@@ -35,6 +35,7 @@ import { searchRouter } from "./routes/search.routes.js";
 import { pulseRouter } from "./routes/pulse.routes.js";
 import { wsbRouter } from "./routes/wsb.routes.js";
 import { arenaRouter } from "./routes/arena.routes.js";
+import { yoloArenaRouter } from "./routes/yoloArena.routes.js";
 import { calendarRouter } from "./routes/calendar.routes.js";
 import { discussionRouter } from "./routes/discussion.routes.js";
 import { dashboardRouter } from "./routes/dashboard.routes.js";
@@ -116,6 +117,9 @@ app.use("/api", pulseRouter);
 app.use("/api", wsbRouter);
 // Public Arena rankings (read-only, no auth). /arena/me applies requireAuth
 // inside the router.
+// Mounted BEFORE arenaRouter: the Arena leaderboard is the prediction
+// contest now, and the ticker tables it kept are the only thing left behind.
+app.use("/api", yoloArenaRouter);
 app.use("/api", arenaRouter);
 // Public earnings calendar (read-only, no auth). /calendar/me/earnings and the
 // preference endpoints apply requireAuth inside the router.

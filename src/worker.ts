@@ -29,6 +29,7 @@ import { recalculateArenaUserPerformance } from "./jobs/recalculateArenaUserPerf
 import { refreshEarningsCalendar } from "./jobs/refreshEarningsCalendar.job.js";
 import { refreshWsbPortfolio } from "./jobs/refreshWsbPortfolio.job.js";
 import { refreshWsbBanbets } from "./jobs/refreshWsbBanbets.job.js";
+import { resolveYoloBetsJob } from "./jobs/resolveYoloBets.job.js";
 import { refreshTickerCatalog } from "./jobs/refreshTickerCatalog.job.js";
 import { runRedditIngestion } from "./workers/redditWorker.js";
 import { buildArcticShiftWorker } from "./workers/reddit/startArcticShiftWorker.js";
@@ -348,6 +349,15 @@ export function startSchedulers(): void {
       intervalSeconds: env.WSB_REFRESH_SECONDS,
       run: refreshWsbBanbets,
       initialDelayMs: 120_000,
+    }),
+    // Settles the Arena: YOLOPulse bets against stored candles, then any
+    // confirmed banbet that resolved without a score. Offset behind the banbet
+    // refresh so it scores what that run just settled.
+    startJobLoop({
+      name: "resolveYoloBets",
+      intervalSeconds: env.WSB_REFRESH_SECONDS,
+      run: resolveYoloBetsJob,
+      initialDelayMs: 150_000,
     }),
   );
 

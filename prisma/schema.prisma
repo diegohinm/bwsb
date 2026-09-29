@@ -1958,6 +1958,28 @@ model WsbBanbets {
   isMock          Boolean   @default(false) @map("is_mock")
   fetchedAt       DateTime  @default(now()) @map("fetched_at") @db.Timestamptz(6)
 
+  /// The comment that carried the !banbet, and the thread it sat in.
+  redditCommentId   String? @map("reddit_comment_id")
+  redditPostId      String? @map("reddit_post_id")
+  /// The WSB bot's reply. Its presence is what turns a candidate into a record.
+  botReplyCommentId String? @map("bot_reply_comment_id")
+  /// `candidate` | `confirmed`. Only confirmed rows reach the leaderboard.
+  confirmation      String  @default("candidate")
+
+  /// Scoring, component by component — all nullable, because a historical
+  /// banbet whose entry price or volatility cannot be reconstructed shows N/A
+  /// rather than a fabricated score.
+  entryPrice        Decimal? @map("entry_price") @db.Decimal
+  volatilityAtEntry Decimal? @map("volatility_at_entry") @db.Decimal
+  targetMove        Decimal? @map("target_move") @db.Decimal
+  expectedMove      Decimal? @map("expected_move") @db.Decimal
+  difficulty        Decimal? @db.Decimal
+  rawScore          Decimal? @map("raw_score") @db.Decimal
+  scoreDelta        Decimal? @map("score_delta") @db.Decimal
+  scoringVersion    String?  @map("scoring_version")
+
+  @@index([resolvedAt(sort: Desc)], map: "wsb_banbets_resolved_idx")
+  @@index([confirmation, status], map: "wsb_banbets_confirmation_idx")
   @@index([status, expiresAt], map: "wsb_banbets_status_expires_idx")
   @@index([ticker, createdAt(sort: Desc)], map: "wsb_banbets_ticker_created_idx")
   @@index([appUserId, createdAt(sort: Desc)], map: "wsb_banbets_app_user_idx")
@@ -2283,4 +2305,54 @@ model MarketCandle {
   @@id([ticker, interval, timestamp])
   @@index([ticker, interval, timestamp(sort: Desc)], map: "market_candles_lookup_idx")
   @@map("market_candles")
+}
+
+/// YOLOPULSE BET — a prediction made inside YOLOPulse, under our rules.
+///
+/// Deliberately a separate table from `wsb_banbets`. The two ecosystems set
+/// their targets under different rules and their scores are never summed, so
+/// one polymorphic table with a `type` column would only be a filter every
+/// query had to remember.
+///
+/// IMMUTABLE ONCE PLACED. Ticker, direction, entry, target and deadline are
+/// written once; nothing in the API updates them. The only fields that change
+/// after creation are the resolution ones, written by the worker.
+model YoloBets {
+  id     String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId String @map("user_id") @db.Uuid
+  ticker String
+
+  /// `up` | `down`, derived from entry vs target server-side.
+  direction String
+
+  /// The frozen entry. An editable entry price is a time machine.
+  entryPrice          Decimal   @map("entry_price") @db.Decimal
+  entryTimestamp      DateTime  @map("entry_timestamp") @db.Timestamptz(6)
+  /// When the QUOTE was observed — not when the bet was placed.
+  marketDataTimestamp DateTime? @map("market_data_timestamp") @db.Timestamptz(6)
+
+  targetPrice Decimal  @map("target_price") @db.Decimal
+  expiresAt   DateTime @map("expires_at") @db.Timestamptz(6)
+
+  /// `active` | `won` | `lost` | `cancelled`.
+  status      String    @default("active")
+  resolvedAt  DateTime? @map("resolved_at") @db.Timestamptz(6)
+  resultPrice Decimal?  @map("result_price") @db.Decimal
+
+  volatilityAtEntry Decimal? @map("volatility_at_entry") @db.Decimal
+  targetMove        Decimal? @map("target_move") @db.Decimal
+  expectedMove      Decimal? @map("expected_move") @db.Decimal
+  difficulty        Decimal? @db.Decimal
+  rawScore          Decimal? @map("raw_score") @db.Decimal
+  scoreDelta        Decimal? @map("score_delta") @db.Decimal
+  scoringVersion    String?  @map("scoring_version")
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  @@index([status, expiresAt], map: "yolo_bets_status_expires_idx")
+  @@index([userId, resolvedAt(sort: Desc)], map: "yolo_bets_user_resolved_idx")
+  @@index([resolvedAt(sort: Desc)], map: "yolo_bets_resolved_idx")
+  @@index([ticker, createdAt(sort: Desc)], map: "yolo_bets_ticker_idx")
+  @@map("yolo_bets")
 }
