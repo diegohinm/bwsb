@@ -8,7 +8,7 @@
   "scripts": {
     "dev": "tsx watch src/server.ts",
     "dev:worker": "tsx watch src/worker.ts",
-    "build": "node scripts/prisma-generate.mjs && tsc",
+    "build": "tsc",
     "start": "npm run start:api",
     "start:api": "node dist/server.js",
     "worker": "npm run start:worker:jobs",
