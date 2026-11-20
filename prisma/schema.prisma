@@ -1371,6 +1371,45 @@ model TrendingTickerSnapshots {
   @@map("trending_ticker_snapshots")
 }
 
+/// MARKET PULSE — the Dashboard's aggregate crowd-direction gauge, one row per
+/// timeframe per worker run (jobs/refreshMarketPulse.job.ts).
+///
+/// Every input to the score is stored beside it, with the formula version and
+/// minimum sample, so a published score can be recomputed from its own row.
+/// `score` is NULL when the sample was too small — never a neutral-looking 50.
+model MarketPulseSnapshots {
+  id                    String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  timeframe             String
+  windowStart           DateTime  @map("window_start") @db.Timestamptz(6)
+  windowEnd             DateTime  @map("window_end") @db.Timestamptz(6)
+  /// 0..100, or NULL when classified mentions < minClassifiedMentions.
+  score                 Int?
+  bullishCount          Int       @default(0) @map("bullish_count")
+  neutralCount          Int       @default(0) @map("neutral_count")
+  bearishCount          Int       @default(0) @map("bearish_count")
+  /// Mentions whose item has no recognised stance — outside the denominator.
+  unclassifiedCount     Int       @default(0) @map("unclassified_count")
+  /// (item, distinct ticker) pairs counted, classified or not.
+  mentionCount          Int       @default(0) @map("mention_count")
+  itemCount             Int       @default(0) @map("item_count")
+  postCount             Int       @default(0) @map("post_count")
+  commentCount          Int       @default(0) @map("comment_count")
+  tickerCount           Int       @default(0) @map("ticker_count")
+  subreddits            String[]  @default([])
+  /// Real social provider(s) behind the counts. Null when there were none.
+  provider              String?
+  /// Mock-provider or provider-less items seen in the window and NOT counted.
+  excludedItemCount     Int       @default(0) @map("excluded_item_count")
+  minClassifiedMentions Int       @map("min_classified_mentions")
+  formulaVersion        String    @map("formula_version")
+  latestMentionAt       DateTime? @map("latest_mention_at") @db.Timestamptz(6)
+  snapshotAt            DateTime  @map("snapshot_at") @db.Timestamptz(6)
+  createdAt             DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  @@index([timeframe, snapshotAt(sort: Desc)], map: "market_pulse_snapshots_tf_idx")
+  @@map("market_pulse_snapshots")
+}
+
 /// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
 model UserAlertDeliveries {
   id             String          @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid

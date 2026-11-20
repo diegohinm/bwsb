@@ -129,7 +129,15 @@ function safeSession(session: MarketSession): MarketSession {
   return isExtendedHoursSession(session) ? "closed" : session;
 }
 
-function fromStored(q: StoredQuote, marketOpen: boolean): ApiMarketQuote {
+/**
+ * Label one stored row for an API response: real-time clamped to delayed, the
+ * session sanitised, and the last-close / delay caveats attached.
+ *
+ * Exported so every read path that serves a stored quote (quotes endpoint,
+ * dashboard ticker strip) applies the SAME labelling — a symbol cannot read
+ * "Delayed 15m" in one panel and "Last close" in another for the same row.
+ */
+export function fromStored(q: StoredQuote, marketOpen: boolean): ApiMarketQuote {
   const displayMode = safeMode(q.displayMode);
   const isStale = isStaleQuote(q.storedAt, marketOpen);
   const session = safeSession(q.session);

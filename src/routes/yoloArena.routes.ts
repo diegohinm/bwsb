@@ -1,8 +1,9 @@
 import { Router } from "express";
 
-import { asyncHandler } from "../lib/response.js";
+import { asyncHandler, ok } from "../lib/response.js";
 import { requireAuth } from "../middleware/requireAuth.js";
 import { prisma } from "../lib/prisma.js";
+import { readArenaSeason } from "../services/arena/arenaSeason.service.js";
 import {
   isBetStatusFilter,
   isBetType,
@@ -268,6 +269,22 @@ yoloArenaRouter.post(
     }
     return res.status(201).json({ data: result });
   }),
+);
+
+/**
+ * GET /api/arena/season — the current Arena season and what has happened in it.
+ *
+ * Public, read-only, database-only. The season is the Arena's default monthly
+ * board (see arenaSeason.service): its New York calendar window, whether it is
+ * open, how far through it is, and per-contest counts of bets placed, in play
+ * and settled — banbets and YOLOPulse bets side by side, never summed.
+ *
+ * No season number and no fallback: a database failure is a 500, so a client
+ * says "unavailable" instead of drawing an open arena it cannot vouch for.
+ */
+yoloArenaRouter.get(
+  "/arena/season",
+  asyncHandler(async (_req, res) => ok(res, await readArenaSeason())),
 );
 
 /** GET /api/arena/rules — the numbers behind the score, for the tooltip. */

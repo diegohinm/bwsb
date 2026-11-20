@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import { getUsMarketSessionStatus, isUsMarketOpen } from "../usMarketCalendar.js";
+import {
+  getUsMarketSessionStatus,
+  isUsMarketOpen,
+  latestRegularSessionOpen,
+} from "../usMarketCalendar.js";
 
 /**
  * The calendar that decides how often Mindcase gets paid.
@@ -162,5 +166,40 @@ describe("daylight saving transitions", () => {
     // Both are 09:30 local; the UTC instants differ by exactly the DST hour.
     assert.equal(before.sessionOpen, "2026-10-30T13:30:00.000Z");
     assert.equal(after.sessionOpen, "2026-11-03T14:30:00.000Z");
+  });
+});
+
+/**
+ * The reference "is this price from the current session?" is measured against.
+ * Wrong here means a months-old price reads as today's, or today's as stale.
+ */
+describe("latest regular session open", () => {
+  const open = (iso: string) => latestRegularSessionOpen(at(iso))?.toISOString();
+
+  it("is today's bell once the session has opened", () => {
+    assert.equal(open("2026-11-10T11:00:00-05:00"), "2026-11-10T14:30:00.000Z");
+  });
+
+  it("is today's bell after the close too — the close belongs to today's session", () => {
+    assert.equal(open("2026-11-10T18:00:00-05:00"), "2026-11-10T14:30:00.000Z");
+  });
+
+  it("is the previous trading day before today's bell", () => {
+    assert.equal(open("2026-11-10T09:00:00-05:00"), "2026-11-09T14:30:00.000Z");
+  });
+
+  it("is Friday's bell all weekend", () => {
+    assert.equal(open("2026-11-14T12:00:00-05:00"), "2026-11-13T14:30:00.000Z");
+    assert.equal(open("2026-11-16T08:00:00-05:00"), "2026-11-13T14:30:00.000Z");
+  });
+
+  it("skips a holiday", () => {
+    // Thanksgiving 2026-11-26 is closed; the latest session that morning is the 25th.
+    assert.equal(open("2026-11-26T12:00:00-05:00"), "2026-11-25T14:30:00.000Z");
+  });
+
+  it("walks back across a DST change without skipping a day", () => {
+    // Monday 2026-11-02 08:00 EST, the morning after fall-back → Friday's EDT bell.
+    assert.equal(open("2026-11-02T08:00:00-05:00"), "2026-10-30T13:30:00.000Z");
   });
 });

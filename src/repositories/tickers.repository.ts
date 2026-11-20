@@ -13,12 +13,48 @@ const TICKER_COLUMNS = {
 } as const;
 
 /**
+ * A symbol's name as its listing directory publishes it, verbatim — e.g.
+ * "NVIDIA Corporation - Common Stock". Display shaping happens in the service.
+ */
+export interface ListingName {
+  symbol: string;
+  listingName: string;
+  /** The directory that supplied the row, e.g. NASDAQ_TRADER_NASDAQ_LISTED. */
+  source: string;
+}
+
+/**
  * Data access for tickers and their derived daily/narrative context.
  *
  * Rows are returned with their database column names (see lib/rows.ts) because
  * the ticker/search routes serialize them straight onto the wire.
  */
 export const tickersRepository = {
+  /**
+   * Listing-directory names for a set of symbols, in one query.
+   *
+   * Only rows an importer supplied (`source` set — see jobs/refreshTickerCatalog)
+   * are returned. A row no directory owns is development seed data, and its
+   * name is not something the product can cite as fact; a symbol without a
+   * directory row simply has no name here, and the caller says so.
+   */
+  async listingNames(symbols: readonly string[]): Promise<ListingName[]> {
+    const wanted = [...new Set(symbols.map((s) => s.toUpperCase()))];
+    if (wanted.length === 0) return [];
+
+    const rows = await prisma.tickers.findMany({
+      where: { ticker: { in: wanted }, source: { not: null } },
+      select: { ticker: true, companyName: true, source: true },
+    });
+
+    return rows.flatMap((r) => {
+      const name = r.companyName?.trim();
+      return name && r.source
+        ? [{ symbol: r.ticker.toUpperCase(), listingName: name, source: r.source }]
+        : [];
+    });
+  },
+
   async listAll(q?: string): Promise<Ticker[]> {
     const rows = await prisma.tickers.findMany({
       select: TICKER_COLUMNS,

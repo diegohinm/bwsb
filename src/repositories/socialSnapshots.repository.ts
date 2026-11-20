@@ -432,18 +432,25 @@ export async function readLatestPulseMeta(
   };
 }
 
+/**
+ * One stored strip row, AS STORED. Unknown stays unknown: a NULL mention count
+ * is not zero mentions, a NULL stance is not "neutral", and a NULL provider is
+ * not a provider at all — the reader decides what to do with a row it cannot
+ * vouch for, instead of this layer quietly filling in plausible values.
+ */
 export interface StoredTrendingTicker {
   symbol: string;
-  mentionCount: number;
-  sentiment: SocialSentiment;
-  stance: SocialStance;
+  mentionCount: number | null;
+  stance: SocialStance | null;
   price: number | null;
   changePct: number | null;
-  providerSocial: string;
-  providerMarket: string;
+  providerSocial: string | null;
+  providerMarket: string | null;
   isMock: boolean;
   snapshotAt: string;
 }
+
+const STANCES: ReadonlySet<string> = new Set(["bullish", "bearish", "neutral"]);
 
 /** The newest trending-ticker snapshot for a timeframe. */
 export async function readLatestTrendingTickers(
@@ -458,21 +465,23 @@ export async function readLatestTrendingTickers(
   });
   if (!newest._max.snapshotAt) return [];
 
+  // Ties on mention count break alphabetically — the same rule the Popular
+  // Tickers directory uses (tickersRepository.listPopular) — so a ranked list
+  // never reshuffles between two reads of the same batch.
   const rows = await prisma.trendingTickerSnapshots.findMany({
     where: { timeframe, snapshotAt: newest._max.snapshotAt },
-    orderBy: { mentionCount: { sort: "desc", nulls: "last" } },
+    orderBy: [{ mentionCount: { sort: "desc", nulls: "last" } }, { symbol: "asc" }],
     take: limit,
   });
 
   return rows.map((r) => ({
     symbol: r.symbol,
-    mentionCount: r.mentionCount ?? 0,
-    sentiment: (r.sentiment ?? "neutral") as SocialSentiment,
-    stance: (r.stance ?? "neutral") as SocialStance,
+    mentionCount: r.mentionCount,
+    stance: r.stance && STANCES.has(r.stance) ? (r.stance as SocialStance) : null,
     price: num(r.price),
     changePct: num(r.changePct),
-    providerSocial: r.providerSocial ?? "mock",
-    providerMarket: r.providerMarket ?? "mock",
+    providerSocial: r.providerSocial,
+    providerMarket: r.providerMarket,
     isMock: r.isMock,
     snapshotAt: r.snapshotAt.toISOString(),
   }));

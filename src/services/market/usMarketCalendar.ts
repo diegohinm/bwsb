@@ -292,3 +292,31 @@ export function getUsMarketSessionStatus(now: Date = new Date()): UsMarketSessio
 export function isUsMarketOpen(now: Date = new Date()): boolean {
   return getUsMarketSessionStatus(now).isRegularSessionOpen;
 }
+
+/** Half a day: two probes per civil date, so no DST-length day can be skipped. */
+const PROBE_STEP_MS = 12 * 60 * 60 * 1000;
+/** Fifteen days back — longer than any NYSE closure on record. */
+const MAX_PROBES = 30;
+
+/**
+ * The opening bell of the most recent regular session that had begun by `at`.
+ *
+ * This is what "is this price from the current session?" is measured against.
+ * A quote observed before it belongs to an earlier session — on a Tuesday
+ * morning that is Monday's close, which is correct but must not be presented as
+ * today's price; a quote from three months ago is simply out of date. Either
+ * way a reader is owed the date.
+ *
+ * Walks backwards in half-day steps instead of whole days so a 23- or 25-hour
+ * DST day can never make the walk jump over a civil date. The first session
+ * found whose open is at or before `at` is the latest one, because the probes
+ * only move back in time.
+ */
+export function latestRegularSessionOpen(at: Date = new Date()): Date | null {
+  const atMs = at.getTime();
+  for (let step = 0; step <= MAX_PROBES; step += 1) {
+    const { sessionOpen } = getUsMarketSessionStatus(new Date(atMs - step * PROBE_STEP_MS));
+    if (sessionOpen && Date.parse(sessionOpen) <= atMs) return new Date(sessionOpen);
+  }
+  return null;
+}

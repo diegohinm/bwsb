@@ -211,6 +211,13 @@ export interface StoredQuote extends MarketQuote {
   /** When the worker last refreshed this row. */
   storedAt: string | null;
   delayMinutes: number | null;
+  /**
+   * The bar's own time, exactly as stored — null when the row never recorded
+   * one. `timestamp` falls back to the write time so legacy callers always get
+   * a value; a reader that must say HOW OLD a price is uses this instead, so a
+   * worker write is never mistaken for a market observation.
+   */
+  observedAt: string | null;
 }
 
 /** Latest stored quote per symbol. Missing symbols are simply absent. */
@@ -237,6 +244,7 @@ export async function readLatestQuotes(symbols: string[]): Promise<StoredQuote[]
     isDelayed: r.isDelayed,
     delayMinutes: r.delayMinutes,
     storedAt: r.updatedAt ? r.updatedAt.toISOString() : null,
+    observedAt: r.observedAt ? r.observedAt.toISOString() : null,
   }));
 }
 

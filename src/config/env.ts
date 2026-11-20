@@ -251,6 +251,12 @@ const envSchema = z.object({
   /** WORKER: seconds between ticker-strip snapshot runs. */
   TICKER_STRIP_REFRESH_SECONDS: intEnv(300, 60, 86_400),
   /**
+   * WORKER: seconds between Market Pulse snapshot runs. Pure database
+   * derivation (no provider), so this paces freshness, not cost. The API reads
+   * it too: a snapshot older than three intervals is reported stale.
+   */
+  MARKET_PULSE_REFRESH_SECONDS: intEnv(300, 60, 86_400),
+  /**
    * WORKER: seconds between WSB portfolio/banbet runs. Both jobs derive from
    * data already in the database, so this paces CPU and writes — no provider
    * quota is involved and it can safely be shortened.

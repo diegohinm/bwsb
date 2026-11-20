@@ -23,6 +23,7 @@ import {
 } from "./services/reddit/redditRuntimeConfig.js";
 import { syncRedditComments } from "./jobs/syncRedditComments.job.js";
 import { refreshTickerStrip } from "./jobs/refreshTickerStrip.job.js";
+import { refreshMarketPulse } from "./jobs/refreshMarketPulse.job.js";
 import { refreshTickerSocialMetrics } from "./jobs/refreshTickerSocialMetrics.job.js";
 import { refreshArenaTickerPerformance } from "./jobs/refreshArenaTickerPerformance.job.js";
 import { recalculateArenaUserPerformance } from "./jobs/recalculateArenaUserPerformance.job.js";
@@ -299,6 +300,14 @@ export function startSchedulers(): void {
       run: refreshTickerStrip,
       // Runs on DB data only — give the first social/market runs a head start.
       initialDelayMs: 60_000,
+    }),
+    // Dashboard Market Pulse: stance counts over stored Reddit ticker mentions.
+    // Pure database derivation, so the gauge never costs an upstream request.
+    startJobLoop({
+      name: "refreshMarketPulse",
+      intervalSeconds: env.MARKET_PULSE_REFRESH_SECONDS,
+      run: refreshMarketPulse,
+      initialDelayMs: 65_000,
     }),
     // Per-ticker social buckets: pure derivation over stored content, so the
     // Popular Tickers sentiment column and the trend chart never touch a
