@@ -1,4 +1,3 @@
-
 name: YOLOPulse CI
 
 on:
@@ -6,8 +5,9 @@ on:
   pull_request:
 
 jobs:
-  backend:
-    name: Backend CI
+
+  lint:
+    name: Lint
     runs-on: ubuntu-latest
 
     steps:
@@ -18,7 +18,7 @@ jobs:
         uses: actions/setup-node@v7
         with:
           node-version: 22
-          package-manager-cache: false
+          cache: npm
 
       - name: Install dependencies
         run: npm ci
@@ -26,15 +26,79 @@ jobs:
       - name: Lint
         run: npm run lint
 
+
+  typecheck:
+    name: Typecheck
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
       - name: Generate Prisma client
         run: npm run prisma:generate
-        
-      - name: Seed
+
+      - name: Typecheck
         run: npm run typecheck
 
-      - name: Tests
+
+  test:
+    name: Tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Generate Prisma client
+        run: npm run prisma:generate
+
+      - name: Run tests
         run: npm test
+
+
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+
+    needs:
+      - lint
+      - typecheck
+      - test
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Generate Prisma client
+        run: npm run prisma:generate
 
       - name: Build
         run: npm run build
-        
