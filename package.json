@@ -46,6 +46,8 @@
     "start:worker:reddit": "node dist/workers/redditWorker.js",
     "strip:refresh": "tsx src/jobs/refreshTickerStrip.job.ts",
     "test": "tsx --test \"src/**/__tests__/*.test.ts\"",
+    "test:integration": "tsx --test --test-concurrency=1 \"src/**/__integration__/*.test.ts\"",
+    "test:integration:setup": "bash scripts/setup-test-db.sh",
     "ticker-catalog:refresh": "tsx src/jobs/refreshTickerCatalog.job.ts",
     "ticker-catalog:sync-ambiguity": "tsx src/jobs/syncTickerAmbiguity.job.ts",
     "ticker:metrics:refresh": "tsx src/jobs/refreshTickerSocialMetrics.job.ts",

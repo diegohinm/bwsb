@@ -99,3 +99,63 @@ A table created without it would be world-readable.
 There is none in application code. The only direct `pg` usage left is
 `src/lib/sessionStore.ts`, because `connect-pg-simple` requires a `pg.Pool` and
 issues its own SQL against the `session` table.
+
+## CI integration tests
+
+Two suites, two commands:
+
+| Suite | Command | Files | Needs |
+|---|---|---|---|
+| Unit | `npm test` | `src/**/__tests__/*.test.ts` | nothing — no database, no credentials, no network |
+| Integration | `npm run test:integration` | `src/**/__integration__/*.test.ts` | the dedicated **Supabase test project** |
+
+The integration suite runs in the `Integration Tests` job of
+`.github/workflows/ci.yml`, against a Supabase project that exists only for CI
+— **never production**. GitHub maps three repository secrets onto the names the
+app already reads:
+
+| Secret | Becomes |
+|---|---|
+| `TEST_DATABASE_URL` | `DATABASE_URL` |
+| `TEST_SUPABASE_URL` | `SUPABASE_URL` |
+| `TEST_SUPABASE_SERVICE_ROLE_KEY` | `SUPABASE_SERVICE_ROLE_KEY` |
+
+The job runs `scripts/setup-test-db.sh` (guard → `prisma generate` →
+`prisma migrate deploy` → `prisma db seed` → `prisma migrate status`) and then
+the suite. The schema comes from `prisma/migrations/` exactly as in production;
+CI never runs `migrate dev`, `migrate reset` or `db push`.
+
+**The guard.** Both the setup script and the suite (`src/__integration__/requireTestDatabase.ts`)
+refuse to start unless:
+
+- `TEST_DATABASE=true` is set;
+- `NODE_ENV` is not `production`;
+- `DATABASE_URL`, `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` are set **in the
+  environment** — a `.env` file is never consulted for them, because yours points
+  at production;
+- when `SUPABASE_URL` is `https://<ref>.supabase.co`, `DATABASE_URL` belongs to the
+  same project (`postgres.<ref>` pooler user, or `db.<ref>.supabase.co` host).
+
+**Fixtures.** Integration tests create the rows they need under fixed, obviously
+synthetic identifiers (`ci_user_001@example.invalid`, `c1000000-…` uuids) and
+delete exactly those again — before and after, so a crashed run cannot leave a
+leftover that changes the next outcome. Nothing truncates a table or deletes by
+pattern. CI runs one integration job at a time (`concurrency: supabase-test-database`).
+
+**Running it locally** — only with the test project's credentials, never production's:
+
+```bash
+export TEST_DATABASE=true NODE_ENV=test
+export DATABASE_URL='<test project session-pooler URL>'
+export SUPABASE_URL='https://<test-ref>.supabase.co'
+export SUPABASE_SERVICE_ROLE_KEY='<test project service_role key>'
+npm run test:integration:setup   # = bash scripts/setup-test-db.sh
+npm run test:integration
+```
+
+Use the **Session pooler** connection string for `TEST_DATABASE_URL`: GitHub's
+runners have no IPv6, which the direct `db.<ref>.supabase.co` host requires, and
+`prisma migrate` needs session mode (the transaction pooler on 6543 breaks it).
+
+The avatar round trip needs a public `avatars` Storage bucket in the test
+project, as production has; without one that test is reported as skipped.

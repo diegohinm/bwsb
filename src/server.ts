@@ -1,3 +1,7 @@
+// FIRST: refuse to start without DATABASE_URL / SUPABASE_* — before any import
+// below reads them while loading.
+import "./config/requireConnectionEnv.js";
+
 import express from "express";
 import cors from "cors";
 import helmet from "helmet";

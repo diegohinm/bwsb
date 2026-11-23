@@ -55,6 +55,52 @@ const intEnv = (fallback: number, min: number, max: number) =>
       return Math.min(max, Math.max(min, Math.trunc(n)));
     });
 
+/**
+ * The connection settings: the app database and the Supabase admin client.
+ *
+ * They are validated in two places, on purpose:
+ *
+ *  - NODE_ENV=production: exactly as strictly as every other variable, at
+ *    import. A production process without them never starts.
+ *  - Anywhere else: a value that IS set must still be well-formed (checked at
+ *    import), but a MISSING one is reported the moment something reads it —
+ *    `env.DATABASE_URL` throws, naming the variable. The API and the worker
+ *    still refuse to start without them (see `assertConnectionEnv`).
+ *
+ * What the split buys: importing a module whose import graph happens to reach
+ * lib/prisma.ts — a formatter, a pure ranking function under unit test — no
+ * longer exits the process for want of credentials it never uses. The unit
+ * suite runs in CI with none at all; only the integration suite gets them.
+ */
+export const CONNECTION_ENV_KEYS = [
+  "DATABASE_URL",
+  "SUPABASE_URL",
+  "SUPABASE_SERVICE_ROLE_KEY",
+] as const;
+export type ConnectionEnvKey = (typeof CONNECTION_ENV_KEYS)[number];
+
+const connectionSchema = {
+  // App database (Prisma + raw pg pool + session/auth tables).
+  DATABASE_URL: z
+    .string()
+    .regex(/^postgres(ql)?:\/\//, {
+      message: "DATABASE_URL must be a postgres:// or postgresql:// URL",
+    }),
+
+  // Supabase REST client (existing tickers feature).
+  SUPABASE_URL: z.string().url({ message: "SUPABASE_URL must be a valid URL" }),
+  SUPABASE_SERVICE_ROLE_KEY: z
+    .string()
+    .min(1, { message: "SUPABASE_SERVICE_ROLE_KEY is required" }),
+};
+
+/** Outside production: blank counts as unset; anything else must be valid. */
+const deferredConnection = <T extends z.ZodTypeAny>(schema: T) =>
+  z.preprocess(
+    (v) => (typeof v === "string" && v.trim() === "" ? undefined : v),
+    schema.optional(),
+  );
+
 const envSchema = z.object({
   PORT: z.coerce.number().int().positive().default(4000),
   NODE_ENV: z
@@ -82,18 +128,11 @@ const envSchema = z.object({
   FRONTEND_URL: optionalNonEmpty,
   BACKEND_URL: z.string().url().default("http://localhost:4000"),
 
-  // App database (Prisma + raw pg pool + session/auth tables).
-  DATABASE_URL: z
-    .string()
-    .regex(/^postgres(ql)?:\/\//, {
-      message: "DATABASE_URL must be a postgres:// or postgresql:// URL",
-    }),
-
-  // Supabase REST client (existing tickers feature).
-  SUPABASE_URL: z.string().url({ message: "SUPABASE_URL must be a valid URL" }),
-  SUPABASE_SERVICE_ROLE_KEY: z
-    .string()
-    .min(1, { message: "SUPABASE_SERVICE_ROLE_KEY is required" }),
+  // Connection settings — see CONNECTION_ENV_KEYS above. In production the
+  // schema is extended with the strict versions (`productionEnvSchema`).
+  DATABASE_URL: deferredConnection(connectionSchema.DATABASE_URL),
+  SUPABASE_URL: deferredConnection(connectionSchema.SUPABASE_URL),
+  SUPABASE_SERVICE_ROLE_KEY: deferredConnection(connectionSchema.SUPABASE_SERVICE_ROLE_KEY),
 
   // Session signing secret for the new email-auth session cookie (yt_session)
   // and the legacy express-session cookie. Defaulted in non-production so the
@@ -623,7 +662,15 @@ const envSchema = z.object({
   SEED_DEMO_DATA: boolFromString(false),
 });
 
-const parsed = envSchema.safeParse(process.env);
+/**
+ * Production validates the connection settings up front, with exactly the rules
+ * (and messages) every variable gets: missing or malformed, the process exits.
+ */
+const productionEnvSchema = envSchema.extend(connectionSchema);
+
+const parsed = (
+  process.env.NODE_ENV === "production" ? productionEnvSchema : envSchema
+).safeParse(process.env);
 
 if (!parsed.success) {
   // Log only the field names / messages — never the values themselves.
@@ -634,7 +681,56 @@ if (!parsed.success) {
   process.exit(1);
 }
 
-const data = parsed.data;
+const data: z.infer<typeof envSchema> = parsed.data;
+
+const {
+  DATABASE_URL: databaseUrl,
+  SUPABASE_URL: supabaseUrl,
+  SUPABASE_SERVICE_ROLE_KEY: supabaseServiceRoleKey,
+  ...settings
+} = data;
+
+const connection: Record<ConnectionEnvKey, string | undefined> = {
+  DATABASE_URL: databaseUrl,
+  SUPABASE_URL: supabaseUrl,
+  SUPABASE_SERVICE_ROLE_KEY: supabaseServiceRoleKey,
+};
+
+/** Read a connection setting, failing loudly — and by name — when it is unset. */
+function requireConnection(key: ConnectionEnvKey): string {
+  const value = connection[key];
+  if (value === undefined) {
+    throw new Error(
+      `${key} is not set. It is required by anything that reaches the database or Supabase; ` +
+        "set it in the environment (or in .env for local development).",
+    );
+  }
+  return value;
+}
+
+/** The connection settings that are not set, in declaration order. */
+export function missingConnectionEnv(): ConnectionEnvKey[] {
+  return CONNECTION_ENV_KEYS.filter((key) => connection[key] === undefined);
+}
+
+/**
+ * Exit unless every connection setting is present.
+ *
+ * Called by the entrypoints — the API (via config/requireConnectionEnv.ts), the
+ * worker, and every standalone job — so a process that WILL talk to the
+ * database still refuses to start without its credentials, in every
+ * environment, rather than failing at its first query. Library modules never
+ * call it: importing them must stay possible without credentials.
+ */
+export function assertConnectionEnv(processLabel: string): void {
+  const missing = missingConnectionEnv();
+  if (missing.length === 0) return;
+  // Names only — there are no values to leak, they are missing.
+  console.error(
+    `❌ [${processLabel}] Missing required environment variables: ${missing.join(", ")}`,
+  );
+  process.exit(1);
+}
 
 /**
  * Reddit OAuth is only "configured" when a real client id + secret + redirect
@@ -667,7 +763,18 @@ const FRONTEND_ORIGIN =
   data.FRONTEND_ORIGIN ?? data.FRONTEND_URL ?? "http://localhost:5173";
 
 export const env = {
-  ...data,
+  ...settings,
+  // Connection settings are getters so that a missing one fails where it is
+  // first USED, by name — not at import (outside production; see above).
+  get DATABASE_URL(): string {
+    return requireConnection("DATABASE_URL");
+  },
+  get SUPABASE_URL(): string {
+    return requireConnection("SUPABASE_URL");
+  },
+  get SUPABASE_SERVICE_ROLE_KEY(): string {
+    return requireConnection("SUPABASE_SERVICE_ROLE_KEY");
+  },
   FRONTEND_ORIGIN,
   // One resolved value under both names, so no consumer has to know which
   // variable the operator happened to set.

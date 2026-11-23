@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 
-import { supabaseAdmin } from "../../lib/supabaseAdmin.js";
+import { getSupabaseAdmin } from "../../lib/supabaseAdmin.js";
 import { prisma } from "../../lib/prisma.js";
 import { DEFAULT_AVATAR_URL } from "../../config/branding.js";
 
@@ -184,7 +184,7 @@ export async function replaceAvatar(
   });
 
   const key = storageKey(userId, ext);
-  const { error } = await supabaseAdmin.storage
+  const { error } = await getSupabaseAdmin().storage
     .from(AVATAR_BUCKET)
     .upload(key, buffer, { contentType: mime, upsert: false });
 
@@ -192,7 +192,7 @@ export async function replaceAvatar(
     throw new Error(`Avatar upload failed: ${error.message}`);
   }
 
-  const { data } = supabaseAdmin.storage.from(AVATAR_BUCKET).getPublicUrl(key);
+  const { data } = getSupabaseAdmin().storage.from(AVATAR_BUCKET).getPublicUrl(key);
   const avatarUrl = data.publicUrl;
 
   await prisma.appUsers.update({
@@ -234,7 +234,7 @@ async function deletePreviousObject(userId: string, previousUrl: string | null):
     console.warn("[avatar] refusing to delete an object outside the user's own prefix");
     return;
   }
-  const { error } = await supabaseAdmin.storage.from(AVATAR_BUCKET).remove([key]);
+  const { error } = await getSupabaseAdmin().storage.from(AVATAR_BUCKET).remove([key]);
   if (error) {
     // An orphan costs storage; failing the request would cost the user their
     // new avatar for no benefit.

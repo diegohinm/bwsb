@@ -1,6 +1,7 @@
 import { pathToFileURL } from "node:url";
 import { increment } from "./metrics.js";
 
+import { assertConnectionEnv } from "../config/env.js";
 import { WORKER_NAME } from "../config/ingestion.js";
 import { disconnectPrisma } from "./prisma.js";
 import {
@@ -124,6 +125,8 @@ export async function runJobOnce(
  * every loop and stays open until shutdown.
  */
 export async function runJobAsScript(name: string, fn: JobFn): Promise<never> {
+  // A standalone job is an entrypoint: no credentials, no start.
+  assertConnectionEnv(name);
   const ok = await runJobOnce(name, fn);
   await disconnectPrisma();
   process.exit(ok ? 0 : 1);

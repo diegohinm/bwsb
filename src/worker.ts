@@ -1,3 +1,7 @@
+// FIRST: refuse to start without DATABASE_URL / SUPABASE_* — before any import
+// below reads them while loading.
+import "./config/requireConnectionEnv.js";
+
 import { env } from "./config/env.js";
 import { BRANDING } from "./config/branding.js";
 import { arcticShiftWorkerConfig, redditConfig } from "./config/reddit.config.js";

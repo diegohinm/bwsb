@@ -115,9 +115,15 @@ describe("POST /auth/email/start — IP rate limiting", () => {
   it("eventually answers 429 with Retry-After from one address", async () => {
     // The IP limiter allows 10 per window and is shared with the cases above,
     // so this only asserts that the endpoint DOES refuse and says when to retry.
+    //
+    // MALFORMED addresses, deliberately. The limiter sits in front of
+    // validation, so they count toward it exactly like real ones — but none can
+    // reach requestEmailSignup(), which writes to the database and sends mail.
+    // With valid addresses the requests that got in before the 429 did exactly
+    // that, against whatever DATABASE_URL / SMTP_* a developer's .env held.
     let throttled: { status: number; headers: Headers } | null = null;
     for (let i = 0; i < 30 && !throttled; i += 1) {
-      const result = await start(`burst${i}@example.com`);
+      const result = await start(`burst${i}-not-an-email`);
       if (result.status === 429) throttled = result;
     }
 
