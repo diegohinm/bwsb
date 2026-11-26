@@ -1,96 +1,140 @@
 #!/usr/bin/env bash
 
-# Prepare the dedicated Supabase TEST project for the integration suite:
-# guard -> prisma generate -> migrate deploy -> seed -> migrate status
-
 set -euo pipefail
 
-cd "$(dirname "$0")/.."
+# Move to the project root
+cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
-refuse() {
-  echo "ERROR: $1" >&2
-  exit 1
-}
+echo "Starting test database setup..."
 
-echo "XXXXXXXXXXXXX" 
-echo "${TEST_DATABASE_URL:-}"
-#echo "${secrets.TEST_DATABASE_URL:-}"
-echo "${SUPABASE_URL:-}"
-echo "XXXXXXXXXXXXX"
+# ==========================================
+# 1. Safety guard
+# ==========================================
 
-echo "${TEST_SUPABASE_URL:-}"
-
-echo "22222222222222"
-
-# 1. Explicit opt-in.
-if [ "${TEST_DATABASE:-}" != "true" ]; then
-  refuse "refusing to prepare database because TEST_DATABASE=true is not set"
+if [[ "${TEST_DATABASE:-}" != "true" ]]; then
+    echo "ERROR: TEST_DATABASE must be true."
+    exit 1
 fi
 
-# 2. Never run with production runtime configuration.
-if [ "${NODE_ENV:-}" = "production" ]; then
-  refuse "refusing to prepare database because NODE_ENV=production"
+if [[ "${NODE_ENV:-}" != "test" ]]; then
+    echo "ERROR: NODE_ENV must be test."
+    exit 1
 fi
 
-# 3. Require TEST-only connection settings.
-missing=()
+# ==========================================
+# 2. Validate environment variables
+# ==========================================
 
-for name in TEST_DATABASE_URL TEST_SUPABASE_URL TEST_SUPABASE_SERVICE_ROLE_KEY; do
-  value="${!name:-}"
+REQUIRED_VARS=(
+    TEST_DATABASE_URL
+    TEST_SUPABASE_URL
+    TEST_SUPABASE_SERVICE_ROLE_KEY
+)
 
-  if [ -z "${value//[[:space:]]/}" ]; then
-    missing+=("$name")
-  fi
+for var in "${REQUIRED_VARS[@]}"; do
+    if [[ -z "${!var:-}" ]]; then
+        echo "ERROR: $var is missing or empty."
+        exit 1
+    fi
+
+    echo "OK: $var is configured."
 done
 
-if [ "${#missing[@]}" -gt 0 ]; then
-  refuse "refusing to prepare database: missing required environment variable(s): ${missing[*]}"
-fi
+# ==========================================
+# 3. Validate Supabase project
+# ==========================================
 
-# 4. Map TEST variables to the names expected by Prisma/application code.
-# These exports exist only inside this script process and its child processes.
+node <<'JS'
+try {
+    const databaseUrl = new URL(process.env.TEST_DATABASE_URL);
+    const supabaseUrl = new URL(process.env.TEST_SUPABASE_URL);
+
+    const projectRef = supabaseUrl.hostname.split('.')[0];
+
+    const validSupabase =
+        supabaseUrl.protocol === 'https:' &&
+        supabaseUrl.hostname === `${projectRef}.supabase.co`;
+
+    const validProtocol =
+        ['postgres:', 'postgresql:'].includes(databaseUrl.protocol);
+
+    const isDirect =
+        databaseUrl.hostname === `db.${projectRef}.supabase.co`;
+
+    const isPooler =
+        databaseUrl.hostname.endsWith('.pooler.supabase.com') &&
+        decodeURIComponent(databaseUrl.username) === `postgres.${projectRef}`;
+
+    console.log("Supabase hostname:", supabaseUrl.hostname);
+    console.log("Database hostname:", databaseUrl.hostname);
+    console.log("Project reference:", projectRef);
+
+    console.log("Valid Supabase URL:", validSupabase);
+    console.log("Valid database protocol:", validProtocol);
+    console.log("Direct connection matches:", isDirect);
+    console.log("Pooler connection matches:", isPooler);
+
+    if (!validSupabase) {
+        throw new Error("Invalid TEST_SUPABASE_URL");
+    }
+
+    if (!validProtocol) {
+        throw new Error("Invalid database protocol");
+    }
+
+    if (!isDirect && !isPooler) {
+        throw new Error("Database does not match Supabase project");
+    }
+
+    console.log("OK: Supabase project matches database project.");
+
+} catch (error) {
+    console.error(
+        "ERROR:",
+        error instanceof TypeError
+            ? "Invalid URL format"
+            : error.message
+    );
+    process.exit(1);
+}
+JS
+
+# ==========================================
+# 4. Map test environment variables
+# ==========================================
+
 export DATABASE_URL="$TEST_DATABASE_URL"
 export SUPABASE_URL="$TEST_SUPABASE_URL"
 export SUPABASE_SERVICE_ROLE_KEY="$TEST_SUPABASE_SERVICE_ROLE_KEY"
 
-# 5. Verify that DATABASE_URL belongs to the same Supabase project as SUPABASE_URL.
-if [[ "$SUPABASE_URL" =~ ^https://([A-Za-z0-9]+)\.supabase\.co/?$ ]]; then
-  project_ref="${BASH_REMATCH[1]}"
+echo "Safety guard passed."
 
-  db_rest="${DATABASE_URL#*://}"
-  db_userinfo="${db_rest%%@*}"
-  db_user="${db_userinfo%%:*}"
-  db_location="${db_rest##*@}"
+# ==========================================
+# 5. Generate Prisma client
+# ==========================================
 
-  shopt -s nocasematch
+echo "Generating Prisma client..."
+npm run prisma:generate
 
-  if [[ "$db_user $db_location" != *"$project_ref"* ]]; then
-    shopt -u nocasematch
-    refuse "refusing to prepare database: TEST_DATABASE_URL does not belong to the Supabase project named by TEST_SUPABASE_URL"
-  fi
+# ==========================================
+# 6. Deploy migrations
+# ==========================================
 
-  shopt -u nocasematch
-  ref_check="TEST_DATABASE_URL matches the TEST_SUPABASE_URL project"
-else
-  ref_check="project-ref comparison skipped (TEST_SUPABASE_URL is not a *.supabase.co URL)"
-fi
+echo "Deploying test database migrations..."
+npm run prisma:migrate:deploy
 
-echo "Test database guard passed:"
-echo "  - TEST_DATABASE=true"
-echo "  - NODE_ENV=${NODE_ENV:-<unset>}"
-echo "  - TEST_DATABASE_URL, TEST_SUPABASE_URL, TEST_SUPABASE_SERVICE_ROLE_KEY are set (values not shown)"
-echo "  - ${ref_check}"
+# ==========================================
+# 7. Seed test database
+# ==========================================
 
-run() {
-  echo
-  echo "==> npm run $1"
-  npm run "$1"
-}
+echo "Seeding test database..."
+npm run prisma:seed
 
-run prisma:generate
-run prisma:migrate:deploy
-run prisma:seed
-run prisma:status
+# ==========================================
+# 8. Check migration status
+# ==========================================
 
-echo
-echo "Test database ready."
+echo "Checking migration status..."
+npm run prisma:status
+
+echo "Test database setup completed successfully."
