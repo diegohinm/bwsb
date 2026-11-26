@@ -44,60 +44,26 @@ done
 # 3. Validate Supabase project
 # ==========================================
 
-# node <<'JS'
-# try {
-#     const databaseUrl = new URL(process.env.TEST_DATABASE_URL);
-#     const supabaseUrl = new URL(process.env.TEST_SUPABASE_URL);
+node <<'JS'
+try {
+    const database = new URL(process.env.TEST_DATABASE_URL);
+    const supabase = new URL(process.env.TEST_SUPABASE_URL);
+    const projectRef = /^([a-z0-9]+)\.supabase\.co$/.exec(supabase.hostname)?.[1];
+    const direct = database.hostname === `db.${projectRef}.supabase.co`;
+    const pooler = database.hostname.endsWith('.pooler.supabase.com') &&
+        decodeURIComponent(database.username) === `postgres.${projectRef}`;
 
-#     const projectRef = supabaseUrl.hostname.split('.')[0];
-
-#     const validSupabase =
-#         supabaseUrl.protocol === 'https:' &&
-#         supabaseUrl.hostname === `${projectRef}.supabase.co`;
-
-#     const validProtocol =
-#         ['postgres:', 'postgresql:'].includes(databaseUrl.protocol);
-
-#     const isDirect =
-#         databaseUrl.hostname === `db.${projectRef}.supabase.co`;
-
-#     const isPooler =
-#         databaseUrl.hostname.endsWith('.pooler.supabase.com') &&
-#         decodeURIComponent(databaseUrl.username) === `postgres.${projectRef}`;
-
-#     console.log("Supabase hostname:", supabaseUrl.hostname);
-#     console.log("Database hostname:", databaseUrl.hostname);
-#     console.log("Project reference:", projectRef);
-
-#     console.log("Valid Supabase URL:", validSupabase);
-#     console.log("Valid database protocol:", validProtocol);
-#     console.log("Direct connection matches:", isDirect);
-#     console.log("Pooler connection matches:", isPooler);
-
-#     if (!validSupabase) {
-#         throw new Error("Invalid TEST_SUPABASE_URL");
-#     }
-
-#     if (!validProtocol) {
-#         throw new Error("Invalid database protocol");
-#     }
-
-#     if (!isDirect && !isPooler) {
-#         throw new Error("Database does not match Supabase project");
-#     }
-
-#     console.log("OK: Supabase project matches database project.");
-
-# } catch (error) {
-#     console.error(
-#         "ERROR:",
-#         error instanceof TypeError
-#             ? "Invalid URL format"
-#             : error.message
-#     );
-#     process.exit(1);
-# }
-# JS
+    if (projectRef && supabase.protocol === 'https:' &&
+        ['postgres:', 'postgresql:'].includes(database.protocol) &&
+        (direct || pooler) && process.env.TEST_SUPABASE_SERVICE_ROLE_KEY.trim()) {
+        process.exit(0);
+    }
+} catch {
+    // URL parsing errors may contain credentials. Report only the variable names.
+}
+console.error('ERROR: Configure TEST_DATABASE_URL and TEST_SUPABASE_URL for the same Supabase project and set TEST_SUPABASE_SERVICE_ROLE_KEY.');
+process.exit(1);
+JS
 
 # ==========================================
 # 4. Map test environment variables
