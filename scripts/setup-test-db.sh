@@ -12,6 +12,16 @@ refuse() {
   exit 1
 }
 
+echo "XXXXXXXXXXXXX" 
+echo "${TEST_DATABASE_URL:-}"
+#echo "${secrets.TEST_DATABASE_URL:-}"
+echo "${SUPABASE_URL:-}"
+echo "XXXXXXXXXXXXX"
+
+echo "${TEST_SUPABASE_URL:-}"
+
+echo "22222222222222"
+
 # 1. Explicit opt-in.
 if [ "${TEST_DATABASE:-}" != "true" ]; then
   refuse "refusing to prepare database because TEST_DATABASE=true is not set"
