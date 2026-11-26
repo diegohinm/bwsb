@@ -36,6 +36,9 @@ refuse() {
 
 # 1. Explicit opt-in. Not a perfect production guard — positive evidence that
 #    the caller means the test project.
+
+SUPABASE_URL: ${{ secrets.TEST_SUPABASE_URL }}
+
 if [ "${TEST_DATABASE:-}" != "true" ]; then
   echo "ERROR: refusing to prepare database because TEST_DATABASE=true is not set" >&2
   exit 1
