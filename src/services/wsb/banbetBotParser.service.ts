@@ -242,7 +242,7 @@ export function parseBanbetCreated(body: string | null | undefined): ParsedBanbe
 export function parseBanbetResult(body: string | null | undefined): ParsedBanbetResult | null {
   if (!body) return null;
 
-  const header = /\*\*BanBet\s+(Won|Lost|Expired)\*\*\s*[—-]\s*\/u\/([A-Za-z0-9_\-]+)/i.exec(body);
+  const header = /\*\*BanBet\s+(Won|Lost|Expired)\*\*\s*[—-]\s*\/u\/([A-Za-z0-9_-]+)/i.exec(body);
   if (!header) return null;
 
   const outcome = (header[1] ?? "").toLowerCase() as ParsedBanbetResult["outcome"];

@@ -6,7 +6,7 @@ import type { AuthUser } from "../services/auth/session.service.js";
  * guaranteed present after requireAuth.
  */
 declare global {
-  // eslint-disable-next-line @typescript-eslint/no-namespace
+   
   namespace Express {
     interface Request {
       user?: AuthUser;

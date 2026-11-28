@@ -50,7 +50,7 @@ import type { DiscussionFrame } from "../realtime/discussionEvents.js";
 
 export const discussionRouter = Router();
 
-const SYMBOL = /^[A-Z][A-Z.\-]{0,9}$/;
+const SYMBOL = /^[A-Z][A-Z.-]{0,9}$/;
 /** SSE keep-alive: without it a proxy will drop an idle stream. */
 const SSE_HEARTBEAT_MS = 25_000;
 

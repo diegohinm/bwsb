@@ -33,7 +33,7 @@ function jpegHeader(width = 256, height = 256): Buffer {
   Buffer.from([0xff, 0xd8, 0xff]).copy(buf, 0);
   buf[3] = 0xe0;
   buf.writeUInt16BE(16, 4); // segment length
-  let o = 20;
+  const o = 20;
   buf[o] = 0xff;
   buf[o + 1] = 0xc0;
   buf.writeUInt16BE(17, o + 2);

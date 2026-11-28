@@ -158,6 +158,9 @@ jobs:
       # One script, so no step can ever run a migration ahead of the guard.
       - name: Prepare test database (guard, generate, migrate deploy, seed)
         run: bash scripts/setup-test-db.sh
-
       - name: Run integration tests
+        env:
+          DATABASE_URL: ${{ env.TEST_DATABASE_URL }}
+          SUPABASE_URL: ${{ env.TEST_SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ env.TEST_SUPABASE_SERVICE_ROLE_KEY }}
         run: npm run test:integration

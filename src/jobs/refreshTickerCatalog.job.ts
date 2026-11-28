@@ -234,7 +234,6 @@ async function applySource(
  */
 async function runSource(
   definition: SourceDefinition,
-  seenAt: Date,
 ): Promise<{ outcome: SourceOutcome; records: NormalizedTickerRecord[] }> {
   const startedAt = new Date();
   const empty = {
@@ -320,7 +319,7 @@ export async function refreshTickerCatalog(): Promise<JobMetadata> {
   const outcomes: SourceOutcome[] = [];
 
   for (const definition of definitions) {
-    const { outcome, records } = await runSource(definition, seenAt);
+    const { outcome, records } = await runSource(definition);
     outcomes.push(outcome);
     if (outcome.status === "success") parsedBySource.set(definition.id, records);
   }

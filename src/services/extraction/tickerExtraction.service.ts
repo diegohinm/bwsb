@@ -187,7 +187,7 @@ const FINANCIAL_CUES = [
   "moon", "tendies", "diamond hands", "cost basis", "premium", "assigned",
 ];
 
-const CASHTAG = /\$([A-Za-z][A-Za-z.\-]{0,5})\b/g;
+const CASHTAG = /\$([A-Za-z][A-Za-z.-]{0,5})\b/g;
 const BARE_SYMBOL = /\b([A-Z]{1,5})\b/g;
 
 /** Build the lookup structures the extractor needs from raw catalog rows. */
@@ -311,7 +311,7 @@ export function extractTickerMatches(
   //    intent, not existence.
   for (const m of text.matchAll(CASHTAG)) {
     const raw = m[1];
-    const symbol = raw.toUpperCase().replace(/[.\-]+$/, "");
+    const symbol = raw.toUpperCase().replace(/[.-]+$/, "");
     if (!catalog.bySymbol.has(symbol)) continue;
     offer({
       symbol,

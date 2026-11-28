@@ -29,7 +29,7 @@ const num = (v: unknown): number | null => {
 };
 
 async function main(): Promise<void> {
-  let competitions: Array<{ id: string; name: string }> = [];
+  let competitions: Array<{ id: string; name: string }>;
   try {
     competitions = await prisma.competitions.findMany({
       where: { isActive: true },

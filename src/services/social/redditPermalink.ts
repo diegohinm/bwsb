@@ -118,7 +118,7 @@ export function normalizeFlair(raw: string | null | undefined): string | null {
   // the flair, and a flair that was ONLY shortcodes becomes null so no empty
   // badge appears.
   const cleaned = text
-    .replace(/:[a-z0-9_\-]+:/gi, " ")
+    .replace(/:[a-z0-9_-]+:/gi, " ")
     .replace(/\s+/g, " ")
     .trim();
   return cleaned.length > 0 ? cleaned.slice(0, 80) : null;

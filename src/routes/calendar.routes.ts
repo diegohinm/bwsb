@@ -119,7 +119,7 @@ calendarRouter.get(
   "/calendar/earnings/:symbol",
   asyncHandler(async (req, res) => {
     const symbol = String(req.params.symbol ?? "").trim().toUpperCase();
-    if (!/^[A-Z][A-Z.\-]{0,9}$/.test(symbol)) {
+    if (!/^[A-Z][A-Z.-]{0,9}$/.test(symbol)) {
       return fail(res, "Invalid ticker symbol", 400);
     }
     // A single ticker gets a wider default window than the grid: the detail
@@ -194,7 +194,7 @@ async function validateTickers(
     if (typeof item !== "string") continue;
     const symbol = item.trim().toUpperCase();
     if (!symbol) continue;
-    if (!/^[A-Z][A-Z.\-]{0,9}$/.test(symbol)) {
+    if (!/^[A-Z][A-Z.-]{0,9}$/.test(symbol)) {
       if (!malformed.includes(symbol)) malformed.push(symbol);
       continue;
     }

@@ -28,7 +28,7 @@ import type { DiscussionFrame } from "./discussionEvents.js";
 const PATH = "/ws/discussion";
 const HEARTBEAT_MS = 25_000;
 /** Rejects anything not shaped like a symbol before it reaches a query. */
-const SYMBOL = /^[A-Z][A-Z.\-]{0,9}$/;
+const SYMBOL = /^[A-Z][A-Z.-]{0,9}$/;
 
 type Live = WebSocket & { isAlive?: boolean; unsubscribe?: () => void; ticker?: string };
 

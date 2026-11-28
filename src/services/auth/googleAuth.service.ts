@@ -126,7 +126,7 @@ export async function findOrCreateUserFromGoogle(
       where: { emailNormalized: normalized },
       select: { id: true },
     });
-    if (!raced) throw new Error("Failed to create user from Google identity");
+    if (!raced) throw new Error("Failed to create user from Google identity",{cause:err});
 
     await linkGoogleToExistingUser(raced.id, identity);
     return { userId: raced.id };

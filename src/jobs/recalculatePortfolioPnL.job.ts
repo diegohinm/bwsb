@@ -21,7 +21,7 @@ const n = (v: unknown): number => {
 };
 
 async function main(): Promise<void> {
-  let accounts: Array<{ id: string; userId: string; cashBalance: Prisma.Decimal }> = [];
+  let accounts: Array<{ id: string; userId: string; cashBalance: Prisma.Decimal }>;
   try {
     accounts = await prisma.virtualAccounts.findMany({
       select: { id: true, userId: true, cashBalance: true },

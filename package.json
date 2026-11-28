@@ -20,6 +20,7 @@
     "dev:worker:reddit": "tsx watch src/workers/redditWorker.ts",
     "ingest:once": "npm run market:refresh && npm run movers:refresh && npm run social:refresh && npm run strip:refresh && npm run pulse:refresh && npm run ticker:metrics:refresh && npm run wsb:portfolio:refresh && npm run wsb:banbets:refresh",
     "lint": "eslint .",
+    "lint:fix": "eslint . --fix",
     "jobs:all": "npm run portfolio:recalculate && npm run leaderboard:recalculate && npm run tokens:expire && npm run ingest:once",
     "leaderboard:recalculate": "tsx src/jobs/recalculateLeaderboard.job.ts",
     "market:enqueue": "tsx src/jobs/enqueueMarketDataJobs.job.ts",
@@ -95,7 +96,8 @@
   "devDependencies": {
     "@eslint/js": "^10.0.1",
     "eslint": "^10.15.0",
+    "globals": "^17.14.0",
     "tsx": "^4.19.1",
-    "typescript-eslint": "^8.73.0"
+    "typescript-eslint": "^8.74.0"
   }
 }

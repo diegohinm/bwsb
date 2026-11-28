@@ -98,7 +98,7 @@ export async function createYoloBet(input: CreateBetInput): Promise<CreateBetRes
   const now = input.now ?? new Date();
   const ticker = input.ticker.trim().toUpperCase();
 
-  if (!/^[A-Z][A-Z.\-]{0,9}$/.test(ticker)) {
+  if (!/^[A-Z][A-Z.-]{0,9}$/.test(ticker)) {
     return fail("unknown_ticker", "That does not look like a ticker symbol.");
   }
   if (!Number.isFinite(input.targetPrice) || input.targetPrice <= 0) {

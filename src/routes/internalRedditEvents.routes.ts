@@ -29,7 +29,7 @@ import {
 export const internalRedditEventsRouter = Router();
 
 /** Same shape the WebSocket already speaks — no second vocabulary. */
-const SYMBOL = /^[A-Z][A-Z.\-]{0,9}$/;
+const SYMBOL = /^[A-Z][A-Z.-]{0,9}$/;
 
 function isEventType(value: unknown): value is DiscussionEventType {
   return (
